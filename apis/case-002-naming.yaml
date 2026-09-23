@@ -1,0 +1,107 @@
+# CASE 002 — naming non conforme: schema non PascalCase, proprietà non camelCase.
+openapi: 3.0.3
+info:
+  title: Payment Orders API
+  version: 1.0.0
+  description: Payment orders management.
+  license:
+    name: Apache-2.0
+  contact:
+    name: API Team
+    email: api-team@example.com
+servers:
+  - url: https://api.example.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /payment-orders:
+    post:
+      operationId: createPaymentOrder
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/payment_order"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/payment_order"
+        "400":
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /payment-orders/{payment-order-id}:
+    get:
+      operationId: getPaymentOrder
+      parameters:
+        - name: payment-order-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The payment order
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/payment_order"
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    payment_order:
+      type: object
+      required: [amount_value, currency]
+      properties:
+        id:
+          type: string
+        amount_value:
+          type: number
+          format: double
+        currency:
+          type: string
+        payer_iban:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string

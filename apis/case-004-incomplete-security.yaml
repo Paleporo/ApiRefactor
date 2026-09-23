@@ -1,0 +1,89 @@
+# CASE 004 — security incompleta: nessuna security globale, nessun securitySchemes,
+# una operation referenzia uno schema ('bearerAuth') mai definito.
+openapi: 3.0.3
+info:
+  title: Merchants API
+  version: 1.0.0
+  description: Merchants directory.
+  license:
+    name: Apache-2.0
+  contact:
+    name: API Team
+    email: api-team@example.com
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /merchants:
+    get:
+      operationId: listMerchants
+      responses:
+        "200":
+          description: Merchants
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MerchantList"
+        "400":
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /merchants/{merchant-id}:
+    get:
+      operationId: getMerchant
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: merchant-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The merchant
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Merchant"
+        "404":
+          description: Not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  schemas:
+    Merchant:
+      type: object
+      properties:
+        id:
+          type: string
+        displayName:
+          type: string
+    MerchantList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Merchant"
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string

@@ -1,0 +1,88 @@
+# CASE 003 — errori senza RFC 9457 Problem Details (application/json con schema ad hoc).
+openapi: 3.0.3
+info:
+  title: Accounts API
+  version: 1.0.0
+  description: Accounts read API.
+  license:
+    name: Apache-2.0
+  contact:
+    name: API Team
+    email: api-team@example.com
+servers:
+  - url: https://api.example.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /accounts:
+    get:
+      operationId: listAccounts
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            format: int32
+      responses:
+        "200":
+          description: Accounts
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountList"
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+  /accounts/{account-id}:
+    get:
+      operationId: getAccount
+      parameters:
+        - name: account-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The account
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Account"
+        "404":
+          description: Account not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorMessage"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Account:
+      type: object
+      properties:
+        id:
+          type: string
+        holderName:
+          type: string
+    AccountList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Account"
+    ErrorMessage:
+      type: object
+      properties:
+        message:
+          type: string
+        errorCode:
+          type: string

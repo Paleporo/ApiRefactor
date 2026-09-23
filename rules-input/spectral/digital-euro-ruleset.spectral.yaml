@@ -1,0 +1,232 @@
+# Digital Euro RESTful API Guidelines — Spectral ruleset
+#
+# Implementa SOLO le regole del documento "Digital Euro RESTful API
+# Guidelines" che sono meccanicamente verificabili in modo deterministico
+# (naming, formati, header, status code). Le regole che richiedono
+# giudizio semantico/contestuale (es. "usa nomi di risorsa specifici del
+# dominio", "modella processi di business completi") NON sono qui:
+# restano gestite dal RuleInterpreter (LLM) + CriticEngine, come da
+# architettura di progetto. Vedi non-mechanical-rules.md per l'elenco
+# completo di cosa resta escluso e perche'.
+#
+# Questo file e' un file di CONFIGURAZIONE: aggiungere/modificare regole
+# qui non richiede modifiche al codice dell'applicativo che lo consuma.
+#
+# Uso:
+#   spectral lint --ruleset digital-euro-ruleset.spectral.yaml <spec.yaml>
+
+extends: []  # nessun extends da spectral:oas: la validita' OpenAPI di base
+             # (sintassi, $ref, schema) e' gia' coperta dall'OpenAPIValidator
+             # deterministico della pipeline (openapi-spec-validator), per
+             # evitare di validare due volte la stessa cosa con due strumenti.
+
+functions:
+  - kebabCasePath
+  - pathNestingDepth
+  - problemDetailsErrors
+  - requiresSuccessResponse
+  - noFormatOnIdProperties
+  - dateTimePropertyNaming
+  - pluralArrayName
+
+rules:
+
+  # ── Specification Info ──────────────────────────────────────────────
+
+  DE-INFO-001-required-fields:
+    description: "MUST describe the API in the info object"
+    message: "L'oggetto info deve includere title, version, description, license, contact"
+    severity: error
+    given: "$.info"
+    then:
+      function: schema
+      functionOptions:
+        schema:
+          type: object
+          required: [title, version, description, license, contact]
+
+  DE-INFO-002-semantic-versioning:
+    description: "MUST use semantic versioning (con suffisso -SNAPSHOT per pre-release)"
+    message: "info.version deve seguire semantic versioning, es. 1.2.3 o 1.2.3-SNAPSHOT"
+    severity: error
+    given: "$.info.version"
+    then:
+      function: pattern
+      functionOptions:
+        match: "^\\d+\\.\\d+\\.\\d+(-SNAPSHOT)?$"
+
+  # ── Data Formats ─────────────────────────────────────────────────────
+
+  DE-FMT-001-number-format:
+    description: "MUST define a format for number and integer types"
+    message: "I tipi number/integer devono specificare un 'format' (int32, int64, float, double, decimal)"
+    severity: error
+    given: "$..[?(@.type=='integer' || @.type=='number')]"
+    then:
+      field: format
+      function: truthy
+
+  DE-FMT-002-id-no-format:
+    description: "SHOULD use UUIDs only when necessary / avoid defining format on ID properties"
+    message: "{{error}}"
+    severity: warn
+    given: "$..properties"
+    then:
+      function: noFormatOnIdProperties
+
+  DE-FMT-003-date-time-naming:
+    description: "SHOULD name date/time properties with indicators (Date/Day/Time/Timestamp/At)"
+    message: "{{error}}"
+    severity: warn
+    given: "$..properties"
+    then:
+      function: dateTimePropertyNaming
+
+  # ── URLs & Paths ─────────────────────────────────────────────────────
+
+  DE-PATH-001-base-path-not-api:
+    description: "SHOULD not use /api as base path"
+    message: "Il base path non dovrebbe contenere '/api' — usa la root o il server object per la configurazione di deployment"
+    severity: warn
+    given: "$.servers[*].url"
+    then:
+      function: pattern
+      functionOptions:
+        notMatch: "/api(/|$)"
+
+  DE-PATH-002-kebab-case:
+    description: "MUST use kebab-case for path segments"
+    message: "{{error}}"
+    severity: error
+    given: "$.paths[*]~"
+    then:
+      function: kebabCasePath
+
+  DE-PATH-003-normalized-paths:
+    description: "MUST use normalized paths (niente slash duplicati o finali)"
+    message: "Il path non deve contenere slash duplicati o slash finale"
+    severity: error
+    given: "$.paths[*]~"
+    then:
+      function: pattern
+      functionOptions:
+        notMatch: "(\\/\\/|.+\\/$)"
+
+  DE-PATH-004-camelcase-query-params:
+    description: "MUST use camelCase for query parameters"
+    message: "Il query parameter '{{value}}' deve essere camelCase"
+    severity: error
+    given: "$..parameters[?(@.in=='query')].name"
+    then:
+      function: casing
+      functionOptions:
+        type: camel
+
+  DE-PATH-005-nesting-depth:
+    description: "SHOULD limit resource types and nesting (max 2-3 livelli)"
+    message: "{{error}}"
+    severity: warn
+    given: "$.paths[*]~"
+    then:
+      function: pathNestingDepth
+      functionOptions:
+        maxStaticSegments: 3
+
+  # ── JSON Payloads ────────────────────────────────────────────────────
+
+  DE-JSON-001-camelcase-properties:
+    description: "MUST use camelCase for property names"
+    message: "La proprieta' '{{value}}' deve essere camelCase (eccetto proprieta' definite da standard esterni)"
+    severity: error
+    given: "$..properties.*~"
+    then:
+      function: casing
+      functionOptions:
+        type: camel
+
+  DE-JSON-002-enum-upper-snake-case:
+    description: "SHOULD use UPPER_SNAKE_CASE for enum values"
+    message: "Il valore enum '{{value}}' dovrebbe essere UPPER_SNAKE_CASE"
+    severity: warn
+    given: "$..[?(@.enum)].enum[*]"
+    then:
+      function: casing
+      functionOptions:
+        type: macro
+
+  DE-JSON-003-boolean-not-nullable:
+    description: "MUST not use null for boolean properties"
+    message: "Le proprieta' boolean non devono essere nullable"
+    severity: error
+    given: "$..[?(@.type=='boolean')]"
+    then:
+      field: nullable
+      function: falsy
+
+  DE-JSON-004-array-pluralized:
+    description: "MUST pluralize array names"
+    message: "{{error}}"
+    severity: warn
+    given: "$..properties"
+    then:
+      function: pluralArrayName
+
+  DE-JSON-005-additional-properties-open:
+    description: "MUST treat OpenAPI schemas as open for extension (no additionalProperties: false)"
+    message: "Non impostare additionalProperties: false — gli schemi devono restare aperti per estensione"
+    severity: error
+    given: "$..additionalProperties"
+    then:
+      function: truthy
+
+  # ── HTTP Semantics ───────────────────────────────────────────────────
+
+  DE-HTTP-001-get-no-body:
+    description: "MUST use HTTP methods correctly — GET non deve avere un request body"
+    message: "Le operation GET non devono definire un requestBody"
+    severity: error
+    given: "$.paths[*].get"
+    then:
+      field: requestBody
+      function: falsy
+
+  # ── HTTP Status Codes ────────────────────────────────────────────────
+
+  DE-STATUS-001-success-response-required:
+    description: "MUST specify success and error responses (almeno un 2xx)"
+    message: "{{error}}"
+    severity: error
+    given: "$..responses"
+    then:
+      function: requiresSuccessResponse
+
+  DE-STATUS-002-problem-json-errors:
+    description: "MUST support Problem JSON for errors (RFC 9457) con proprieta' 'code' obbligatoria"
+    message: "{{error}}"
+    severity: error
+    given: "$..responses"
+    then:
+      function: problemDetailsErrors
+
+  # ── HTTP Headers ─────────────────────────────────────────────────────
+
+  DE-HDR-001-header-case:
+    description: "SHOULD use kebab-case (Train-Case) for custom headers"
+    message: "L'header '{{value}}' dovrebbe essere in Train-Case, es. 'Request-Id'"
+    severity: warn
+    given: "$..parameters[?(@.in=='header')].name"
+    then:
+      function: pattern
+      functionOptions:
+        match: "^[A-Z][a-zA-Z0-9]*(-[A-Z][a-zA-Z0-9]*)*$"
+
+  # ── Compatibility ────────────────────────────────────────────────────
+
+  DE-COMPAT-001-deprecated-has-description:
+    description: "MUST reflect deprecation in API specifications con spiegazione"
+    message: "Gli elementi deprecated:true devono avere una description che spiega la deprecazione"
+    severity: error
+    given: "$..[?(@.deprecated)]"
+    then:
+      field: description
+      function: truthy

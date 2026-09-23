@@ -1,0 +1,95 @@
+# CASE 005 — spec quasi conforme (manca solo Idempotency-Key sul POST).
+# Il test simula una regressione (response 404 rimossa senza motivo) e verifica che il Critic la blocchi.
+openapi: 3.0.3
+info:
+  title: Cards API
+  version: 1.0.0
+  description: Payment cards API.
+  license:
+    name: Apache-2.0
+  contact:
+    name: API Team
+    email: api-team@example.com
+servers:
+  - url: https://api.example.com/v1
+security:
+  - bearerAuth: []
+paths:
+  /cards:
+    post:
+      operationId: createCard
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Card"
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "400":
+          description: Bad request
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /cards/{card-id}:
+    get:
+      operationId: getCard
+      parameters:
+        - name: card-id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The card
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Card"
+        "404":
+          description: Card not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    Card:
+      type: object
+      properties:
+        id:
+          type: string
+        holderName:
+          type: string
+        maskedNumber:
+          type: string
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+        code:
+          type: string

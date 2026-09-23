@@ -1,0 +1,9 @@
+{
+  "name": "api-refactor-node-tools",
+  "private": true,
+  "description": "Node CLI tools invoked as external processes by the Python pipeline (Spectral, swagger2openapi)",
+  "devDependencies": {
+    "@stoplight/spectral-cli": "6.16.3",
+    "swagger2openapi": "7.0.8"
+  }
+}

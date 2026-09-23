@@ -1,0 +1,165 @@
+# CASE 001 — Swagger 2.0 legacy da portare a OpenAPI 3.0.
+# Atteso: nessun endpoint perso, schemi equivalenti, validazione OK.
+swagger: "2.0"
+info:
+  title: Wallet API
+  version: 1.0.0
+  description: Legacy wallet management API (Swagger 2.0).
+  license:
+    name: Apache-2.0
+  contact:
+    name: API Team
+    email: api-team@example.com
+host: api.example.com
+basePath: /v1
+schemes:
+  - https
+consumes:
+  - application/json
+produces:
+  - application/json
+securityDefinitions:
+  apiKeyAuth:
+    type: apiKey
+    in: header
+    name: Authorization
+security:
+  - apiKeyAuth: []
+paths:
+  /wallets:
+    get:
+      operationId: listWallets
+      summary: List wallets
+      produces:
+        - application/json
+        - application/problem+json
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: Wallets
+          schema:
+            $ref: "#/definitions/WalletList"
+        "400":
+          description: Bad request
+          schema:
+            $ref: "#/definitions/Problem"
+    post:
+      operationId: createWallet
+      summary: Create a wallet
+      produces:
+        - application/json
+        - application/problem+json
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          type: string
+        - name: body
+          in: body
+          required: true
+          schema:
+            $ref: "#/definitions/WalletCreation"
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: "#/definitions/Wallet"
+        "400":
+          description: Bad request
+          schema:
+            $ref: "#/definitions/Problem"
+  /wallets/{wallet-id}:
+    parameters:
+      - name: wallet-id
+        in: path
+        required: true
+        type: string
+    get:
+      operationId: getWallet
+      summary: Get a wallet
+      produces:
+        - application/json
+        - application/problem+json
+      responses:
+        "200":
+          description: The wallet
+          schema:
+            $ref: "#/definitions/Wallet"
+        "404":
+          description: Wallet not found
+          schema:
+            $ref: "#/definitions/Problem"
+    delete:
+      operationId: deleteWallet
+      summary: Delete a wallet
+      produces:
+        - application/problem+json
+      responses:
+        "204":
+          description: Deleted
+        "404":
+          description: Wallet not found
+          schema:
+            $ref: "#/definitions/Problem"
+definitions:
+  Wallet:
+    type: object
+    required:
+      - id
+      - ownerName
+    properties:
+      id:
+        type: string
+      ownerName:
+        type: string
+      balance:
+        type: number
+        format: double
+      currency:
+        type: string
+      createdAt:
+        type: string
+        format: date-time
+  WalletCreation:
+    type: object
+    required:
+      - ownerName
+    properties:
+      ownerName:
+        type: string
+      currency:
+        type: string
+  WalletList:
+    type: object
+    properties:
+      items:
+        type: array
+        items:
+          $ref: "#/definitions/Wallet"
+  Problem:
+    type: object
+    required:
+      - type
+      - title
+      - status
+      - code
+    properties:
+      type:
+        type: string
+        format: uri
+      title:
+        type: string
+      status:
+        type: integer
+        format: int32
+      detail:
+        type: string
+      instance:
+        type: string
+      code:
+        type: string

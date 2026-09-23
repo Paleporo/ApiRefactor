@@ -1,0 +1,73 @@
+openapi: 3.1.0
+info:
+  title: Test API
+  version: "1.0"
+servers:
+  - url: https://api.example.local/api
+
+paths:
+  /Payment_Instructions/{paymentInstructionId}:
+    get:
+      operationId: getPaymentInstruction
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      parameters:
+        - name: paymentInstructionId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: sort_order
+          in: query
+          schema:
+            type: string
+        - name: X-Custom-Header
+          in: header
+          schema:
+            type: string
+      responses:
+        "400":
+          description: Bad request
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error_message:
+                    type: string
+  /payment-instructions/{payment-instruction-id}/status/current/detail:
+    post:
+      operationId: legacyOp
+      deprecated: true
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  paymentId:
+                    type: string
+                    format: uuid
+                  amountValue:
+                    type: number
+                  isSettled:
+                    type: boolean
+                    nullable: true
+                  transaction:
+                    type: array
+                    items:
+                      type: string
+                  settlementDate:
+                    type: string
+                    format: date
+                  status:
+                    type: string
+                    enum: [pending, settled]
+                  extra:
+                    type: object
+                    additionalProperties: false
