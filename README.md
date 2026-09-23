@@ -401,3 +401,4 @@ pipeline senza regole, formato della richiesta a Ollama (con trasporto HTTP simu
   peggiore la run chiude in NEEDS_REVIEW, mai in un falso SUCCESS.
 - Il Critic rivede solo i frammenti modificati. Una regola di giudizio non applicata a un frammento che il
   refactoring non ha toccato non viene segnalata.
+# ApiRefactor
