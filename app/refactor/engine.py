@@ -134,6 +134,47 @@ class RefactoringEngine:
             description=f"aggiunto header {'obbligatorio' if op.required else 'opzionale'} {op.header} a {op.target}",
             after=param)
 
+    def _apply_add_query_parameter(self, doc: SpecDocument, op: ops.AddQueryParameter) -> AppliedChange | None:
+        operation = _require_operation(doc, op.target)
+        # rendere obbligatorio un parametro rompe i client esistenti; aggiungerne uno opzionale no
+        category = ChangeCategory.SEMANTIC if op.required else ChangeCategory.GOVERNANCE
+        params = operation.get("parameters") or []
+        for idx, p in enumerate(params):
+            if isinstance(p, dict) and isinstance(p.get("$ref"), str):
+                target = doc.get(p["$ref"][1:]) if p["$ref"].startswith("#") else None
+                if isinstance(target, dict) and target.get("in") == "query" and target.get("name") == op.name:
+                    if bool(target.get("required")) == op.required:
+                        return None
+                    raise ApplyError(f"query parameter '{op.name}' definito via $ref {p['$ref']}: "
+                                     "va modificato il componente, non l'operation")
+                continue
+            if isinstance(p, dict) and p.get("in") == "query" and p.get("name") == op.name:
+                if bool(p.get("required")) == op.required:
+                    return None
+                before = copy.deepcopy(p)
+                p["required"] = op.required
+                return AppliedChange(type=op.type, rule_id=op.rule_id, category=category,
+                                     locations=[jp.child(op.target, "parameters", idx)],
+                                     description=f"query parameter {op.name} required={op.required} su {op.target}",
+                                     before=before, after=p)
+        path_ptr = jp.parent(op.target)[0]
+        for p in (doc.get(path_ptr) or {}).get("parameters") or []:
+            if isinstance(p, dict) and p.get("in") == "query" and p.get("name") == op.name:
+                if bool(p.get("required")) == op.required:
+                    return None
+                raise ApplyError(f"query parameter '{op.name}' definito a livello di path in {path_ptr} con "
+                                 f"required={bool(p.get('required'))}: va modificato lì, non sulla singola operation")
+        param: dict[str, Any] = {"name": op.name, "in": "query", "required": op.required, "schema": op.schema_}
+        if op.description:
+            param["description"] = op.description
+        params = operation.setdefault("parameters", [])  # creato solo quando si aggiunge davvero
+        params.append(param)
+        return AppliedChange(type=op.type, rule_id=op.rule_id, category=category,
+                             locations=[jp.child(op.target, "parameters", len(params) - 1)],
+                             description=f"aggiunto query parameter {'obbligatorio' if op.required else 'opzionale'} "
+                                         f"{op.name} a {op.target}",
+                             after=param)
+
     def _apply_add_operation_id(self, doc: SpecDocument, op: ops.AddOperationId) -> AppliedChange | None:
         operation = _require_operation(doc, op.target)
         before = operation.get("operationId")

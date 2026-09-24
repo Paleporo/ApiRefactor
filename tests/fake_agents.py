@@ -92,6 +92,11 @@ def scripted_fixes(problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
             elif len(tokens) >= 2 and tokens[-2] == "properties":
                 ops.append({"type": "RENAME_PROPERTY", "target": jp.join(tokens[:-2]), "from": tokens[-1],
                             "to": convert(tokens[-1], Casing.CAMEL), "ruleId": rid})
+        elif str(p.get("suggestedFix") or (p.get("details") or {}).get("suggestedFix") or "").startswith(
+                "ADD_QUERY_PARAMETER"):
+            expected = p.get("expected") or (p.get("details") or {}).get("expected")
+            ops.append({"type": "ADD_QUERY_PARAMETER", "target": jp.join(tokens[:3]), "name": expected["name"],
+                        "required": expected["required"], "schema": {"type": "string"}, "ruleId": rid})
         elif rid == "OPID-001":
             op_ptr = jp.join(tokens[:3])
             ops.append({"type": "ADD_OPERATION_ID", "target": op_ptr,

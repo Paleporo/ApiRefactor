@@ -10,6 +10,7 @@ from app.model.document import OperationView, SpecDocument
 from app.model.issues import Violation, ViolationSource
 from app.model.refs import RefIndex
 from app.rules.models import (CompiledRule, ErrorFormat, NameCasing, NameTarget, RequireHeader, RequireOperationId,
+                              RequireQueryParameter,
                               RequireResponse, RequireSecurity)
 from app.validators import casing as casing_util
 
@@ -65,6 +66,23 @@ class RuleEvaluator:
                 yield self._violation(rule, op.pointer, f"{op.label}: l'header {req.header} deve essere required",
                                       expected={"required": True}, actual={"required": False},
                                       fix=f"ADD_HEADER {req.header} required=true", operation_id=op.operation_id)
+
+    def _eval_requireQueryParameter(self, rule: CompiledRule, req: RequireQueryParameter) -> Iterator[Violation]:
+        """Il parametro deve esistere (path-level o operation-level) con esattamente la requiredness indicata."""
+        wanted = "obbligatorio" if req.required else "opzionale"
+        for op in self._operations(rule):
+            found = [p for p in self._parameters(op) if p.get("in") == "query" and p.get("name") == req.name]
+            if not found:
+                yield self._violation(rule, op.pointer, f"{op.label}: manca il query parameter {wanted} '{req.name}'",
+                                      expected={"name": req.name, "required": req.required}, actual=None,
+                                      fix=f"ADD_QUERY_PARAMETER {req.name} (required={str(req.required).lower()})",
+                                      operation_id=op.operation_id)
+            elif bool(found[-1].get("required")) != req.required:  # l'ultimo è quello a livello operation
+                yield self._violation(rule, op.pointer, f"{op.label}: il query parameter '{req.name}' deve essere {wanted}",
+                                      expected={"name": req.name, "required": req.required},
+                                      actual={"required": bool(found[-1].get("required"))},
+                                      fix=f"ADD_QUERY_PARAMETER {req.name} required={str(req.required).lower()}",
+                                      operation_id=op.operation_id)
 
     def _eval_requireOperationId(self, rule: CompiledRule, req: RequireOperationId) -> Iterator[Violation]:
         seen: dict[str, str] = {}

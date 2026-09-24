@@ -234,9 +234,19 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   errore). Per questo i `$ref` rotti vengono individuati prima, con un controllo deterministico, e
   riportati come `OAS-REF-BROKEN`. Il validator gira poi su una copia in cui sono neutralizzati.
 - **Regole in linguaggio naturale → DSL chiuso.** L'LLM compila ogni regola in un `CompiledRule` con una
-  lista di requisiti tipizzati (`requireHeader`, `requireOperationId`, `nameCasing`, `errorFormat`,
-  `requireSecurity`, `requireResponse`). Il GovernanceValidator valuta questi requisiti **senza LLM**.
-  Ciò che non si riesce a esprimere nel DSL diventa `judgment` e resta affidato al Critic.
+  lista di requisiti tipizzati (`requireHeader`, `requireQueryParameter`, `requireOperationId`, `nameCasing`,
+  `errorFormat`, `requireSecurity`, `requireResponse`). Il GovernanceValidator valuta questi requisiti
+  **senza LLM**. Se nessun requisito esprime *esattamente* il vincolo, il prompt impone `judgment` e vieta di
+  ripiegare sul requisito più simile: un requisito "quasi giusto" produrrebbe violazioni e correzioni
+  sbagliate. Per esempio "le GET che restituiscono collezioni devono accettare `limit`" resta `judgment`,
+  perché "restituisce una collezione" non si può esprimere con `condition`. Le regole `judgment` restano
+  affidate al Critic.
+- **`requireQueryParameter`** (`name`, `required`, più `condition.methods`, per esempio `["get"]`): il
+  parametro deve esistere, dichiarato a livello di operation, di path o via `$ref`, con esattamente la
+  requiredness indicata. La correzione corrispondente è l'operazione `ADD_QUERY_PARAMETER`. Aggiungere un
+  parametro opzionale è GOVERNANCE e non-breaking; renderlo obbligatorio è SEMANTIC e breaking. Se il
+  parametro è definito a livello di path o via `$ref` con una requiredness diversa, l'operazione fallisce in
+  modo esplicito invece di creare un duplicato sulla singola operation.
 - **Cache delle regole compilate** in `.cache/compiled-rules/` (configurabile), una per file `.md`. La
   cache è invalidata dallo SHA-256 del file, dal modello usato e dalla versione del DSL: se un file cambia,
   viene ricompilato per intero. Le compilazioni fallite non vengono salvate, quindi alla run successiva si

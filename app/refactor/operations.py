@@ -33,6 +33,15 @@ class AddHeader(_Op):
     description: str | None = None
 
 
+class AddQueryParameter(_Op):
+    type: Literal["ADD_QUERY_PARAMETER"] = "ADD_QUERY_PARAMETER"
+    target: str = Field(description="JSON pointer dell'operation, es. /paths/~1payments/get")
+    name: str
+    required: bool = False
+    schema_: dict[str, Any] = Field(default_factory=lambda: {"type": "string"}, alias="schema")
+    description: str | None = None
+
+
 class AddOperationId(_Op):
     type: Literal["ADD_OPERATION_ID"] = "ADD_OPERATION_ID"
     target: str
@@ -132,7 +141,7 @@ class RemoveField(_Op):
 
 RefactorOperation = Annotated[
     Union[
-        UpdateOpenApiVersion, AddHeader, AddOperationId, RenameSchema, RenameProperty, RenamePath, RenameParameter,
+        UpdateOpenApiVersion, AddHeader, AddQueryParameter, AddOperationId, RenameSchema, RenameProperty, RenamePath, RenameParameter,
         MoveComponent, AddComponent, ReplaceResponseSchema, ConvertErrorResponse, AddSecurityScheme,
         SetSecurityRequirement, AddResponse, SetField, RemoveField,
     ],

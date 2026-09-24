@@ -91,6 +91,8 @@ def _op_key(op) -> tuple:
         return ("component", "securitySchemes", op.name)
     if t in ("SET_FIELD", "REMOVE_FIELD"):
         return ("field", op.target)
+    if t == "ADD_QUERY_PARAMETER":
+        return ("query-parameter", op.target, op.name)
     if t == "ADD_HEADER":
         return ("header", op.target, op.header.lower())
     if t == "ADD_OPERATION_ID":

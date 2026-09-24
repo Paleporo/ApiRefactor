@@ -1,3 +1,4 @@
+import logging
 import shutil
 from pathlib import Path
 
@@ -12,6 +13,16 @@ ROOT = Path(__file__).resolve().parent.parent
 APIS = ROOT / "apis"
 
 configure_logging("INFO")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_logging():
+    """Chi chiama configure_logging (es. la CLI) lega il logger allo stdout catturato del test, poi chiuso."""
+    logger = logging.getLogger("app")
+    saved_handlers, saved_level = logger.handlers[:], logger.level
+    yield
+    logger.handlers[:] = saved_handlers
+    logger.setLevel(saved_level)
 
 
 @pytest.fixture

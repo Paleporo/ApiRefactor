@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.model.issues import Severity
 
-DSL_VERSION = "1"
+DSL_VERSION = "2"
 
 
 class RuleScope(StrEnum):
@@ -69,6 +69,12 @@ class RequireHeader(_Base):
     required: bool = True
 
 
+class RequireQueryParameter(_Base):
+    kind: Literal["requireQueryParameter"] = "requireQueryParameter"
+    name: str = Field(description="Nome esatto del query parameter (case-sensitive)")
+    required: bool = Field(description="true: deve essere dichiarato required; false: deve esistere ed essere opzionale")
+
+
 class RequireOperationId(_Base):
     kind: Literal["requireOperationId"] = "requireOperationId"
     unique: bool = True
@@ -105,7 +111,8 @@ class JudgmentRequirement(_Base):
 
 Requirement = Annotated[
     Union[
-        RequireHeader, RequireOperationId, NameCasing, ErrorFormat, RequireSecurity, RequireResponse, JudgmentRequirement
+        RequireHeader, RequireQueryParameter, RequireOperationId, NameCasing, ErrorFormat, RequireSecurity,
+        RequireResponse, JudgmentRequirement,
     ],
     Field(discriminator="kind"),
 ]

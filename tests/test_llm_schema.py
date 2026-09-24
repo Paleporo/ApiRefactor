@@ -48,7 +48,7 @@ def assert_discriminators_first(schema: dict) -> int:
     return len(found)
 
 
-@pytest.mark.parametrize("model, variants", [(CompiledRuleDraft, 7), (OperationsProposal, 16), (CriticVerdict, 0)])
+@pytest.mark.parametrize("model, variants", [(CompiledRuleDraft, 8), (OperationsProposal, 17), (CriticVerdict, 0)])
 def test_every_variant_requires_its_discriminator_first(model, variants):
     assert assert_discriminators_first(llm_json_schema(model)) == variants
 
@@ -84,13 +84,17 @@ def test_logging_survives_a_cp1252_console(monkeypatch):
     monkeypatch.setattr(sys, "stdout", console)
     errors: list = []
     monkeypatch.setattr(logging.Handler, "handleError", lambda self, record: errors.append(record))
+    logger = logging.getLogger("app")
+    saved_handlers, saved_level = logger.handlers[:], logger.level
     try:
         configure_logging("DEBUG")
         get_logger("test").debug("[LLM] <- risposta con caratteri fuori cp1252: → ✓ 漢")
         console.flush()
     finally:
+        # ripristina gli handler originali: riconfigurare qui legherebbe il logger a uno stream di test poi chiuso
+        logger.handlers[:] = saved_handlers
+        logger.setLevel(saved_level)
         monkeypatch.undo()
-        configure_logging("INFO")
     assert not errors
     text = raw.getvalue().decode("cp1252")
     assert "[LLM] <- risposta" in text and "?" in text

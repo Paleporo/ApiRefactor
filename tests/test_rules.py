@@ -103,3 +103,17 @@ async def test_compile_failure_keeps_rule_as_judgment_and_is_not_cached(tmp_path
     assert rule.compile_failed and rule.judgment_only
     assert report.failed_rules == ["SEC-001"]
     assert not any("security" in p.name for p in (tmp_path / "c").glob("*.json"))
+
+
+async def test_cache_from_older_dsl_version_is_recompiled(tmp_path, rules_dir):
+    import json
+
+    calls: list = []
+    await build_registry(rules_dir, interpreter(tmp_path, calls))
+    for cache in (tmp_path / "cache").glob("*.json"):
+        payload = json.loads(cache.read_text())
+        payload["dslVersion"] = "1"
+        cache.write_text(json.dumps(payload))
+    before = len(calls)
+    await build_registry(rules_dir, interpreter(tmp_path, calls))
+    assert len(calls) == before * 2  # DSL cambiato: tutte le regole ricompilate, nessuna letta dalla cache vecchia

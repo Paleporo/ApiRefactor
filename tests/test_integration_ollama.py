@@ -64,3 +64,25 @@ async def test_ollama_compiles_security_and_naming_rules_into_the_right_requirem
     assert [r.kind for r in naming.requirements] == ["nameCasing", "nameCasing"]
     assert {(r.target.value, r.casing.value) for r in naming.requirements} == {
         ("schemaName", "pascal"), ("propertyName", "camel")}
+
+
+async def test_ollama_compiles_query_parameter_rule_and_keeps_inexpressible_ones_as_judgment(
+        ollama_config, rules_dir, tmp_path):
+    from app.llm.structured import StructuredLlm
+    from app.rules.interpreter import RuleInterpreter
+    from app.rules.loader import parse_markdown_rules
+
+    (rules_dir / "query.md").write_text(
+        "- [QUERY-LANG-001] Le operation GET devono accettare il query parameter opzionale `lang`.\n")
+    llm = StructuredLlm(OllamaProvider(ollama_config), ollama_config.llm_call_timeout_seconds,
+                        ollama_config.llm_technical_retries)
+    interpreter = RuleInterpreter(llm, tmp_path / "cache")
+
+    lang = await interpreter.compile_rule(parse_markdown_rules(rules_dir / "query.md")[0])
+    assert [r.kind for r in lang.requirements] == ["requireQueryParameter"]
+    assert (lang.requirements[0].name, lang.requirements[0].required) == ("lang", False)
+    assert [m.lower() for m in lang.condition.methods or []] == ["get"]
+
+    # "che restituiscono collezioni" non è esprimibile con condition: deve restare judgment, non il requisito più simile
+    pagination = await interpreter.compile_rule(parse_markdown_rules(rules_dir / "pagination.md")[0])
+    assert [r.kind for r in pagination.requirements] == ["judgment"]
