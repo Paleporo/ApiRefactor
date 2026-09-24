@@ -20,6 +20,7 @@ class AppConfig(BaseModel):
     max_iterations: int = Field(3, alias="maxIterations", ge=1)
     refactor_model: str = Field("qwen3-coder:30b", alias="refactorModel")
     critic_model: str = Field("deepseek-r1:14b", alias="criticModel")
+    critic_think: bool = Field(False, alias="criticThink")
     ollama_host: str = Field("http://localhost:11434", alias="ollamaHost")
     llm_call_timeout_seconds: float = Field(600, alias="llmCallTimeoutSeconds", gt=0)
     llm_technical_retries: int = Field(2, alias="llmTechnicalRetries", ge=0)

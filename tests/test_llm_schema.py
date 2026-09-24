@@ -72,7 +72,8 @@ def test_fixed_schema_still_accepts_valid_payloads_and_rejects_missing_discrimin
 @pytest.mark.needs_node
 async def test_every_schema_sent_during_a_run_has_discriminators_first(config, agents, rules_dir):
     provider = agents.provider()
-    await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-003-no-problem-details.yaml")
+    # caso 002: il nameCasing non ha correzione deterministica, quindi Refactor Agent e Critic vengono chiamati
+    await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-002-naming.yaml")
     titles = {s.get("title") for s in provider.schemas}
     assert {"CompiledRuleDraft", "OperationsProposal", "CriticVerdict"} <= titles
     assert sum(assert_discriminators_first(s) for s in provider.schemas) > 0

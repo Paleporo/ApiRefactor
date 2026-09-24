@@ -49,7 +49,8 @@ class OutputWriter:
                 "sourceVersion": r.source.source_version.value, "targetVersion": r.source.target_version.value,
                 "issues": [i.model_dump() for i in (r.conversion.issues if r.conversion else [])],
             },
-            "iterations": [{"iteration": it.iteration, "summary": count_by_severity(it.validation),
+            "iterations": [{"iteration": it.iteration, "rejected": it.rejected,
+                            "summary": count_by_severity(it.validation),
                             "violations": [v.dump() for v in it.validation]} for it in r.iterations],
             "final": {"iteration": r.final_iteration, "summary": count_by_severity(r.final_validation),
                       "violations": [v.dump() for v in r.final_validation]},
@@ -65,7 +66,12 @@ class OutputWriter:
                                  "compiled": getattr(r.compile_report, "compiled_files", []),
                                  "failed": getattr(r.compile_report, "failed_rules", [])},
             },
-            "iterations": [{"iteration": it.iteration, "summary": count_by_severity(it.governance + it.untraced),
+            "baseline": {"summary": count_by_severity(r.baseline_governance),
+                         "violations": [v.dump() for v in r.baseline_governance]},
+            "iterations": [{"iteration": it.iteration, "rejected": it.rejected,
+                            "rejectionReasons": it.rejection_reasons,
+                            "newViolations": [v.dump() for v in it.new_violations],
+                            "summary": count_by_severity(it.governance + it.untraced),
                             "violations": [v.dump() for v in it.governance + it.untraced]} for it in r.iterations],
             "final": {"iteration": r.final_iteration, "summary": count_by_severity(r.final_governance),
                       "violations": [v.dump() for v in r.final_governance]},
@@ -74,11 +80,13 @@ class OutputWriter:
             "iterations": [it.critic.dump() for it in r.iterations if it.critic],
             "fragmentStates": r.fragment_states,
         })
+        in_final = {id(c) for c in r.final_applied}
         _write_json(reports / "changes.json", {
-            "applied": [{**c.model_dump(by_alias=True, mode="json"), "inFinalOutput": c.iteration <= r.final_iteration}
+            "applied": [{**c.model_dump(by_alias=True, mode="json"), "inFinalOutput": id(c) in in_final}
                         for c in r.applied],
-            "semanticChanges": [c.model_dump(by_alias=True, mode="json") for c in r.applied
-                                if c.category.value == "SEMANTIC" and c.iteration <= r.final_iteration],
+            "semanticChanges": [c.model_dump(by_alias=True, mode="json") for c in r.final_applied
+                                if c.category.value == "SEMANTIC"],
+            "rejected": [c.model_dump(by_alias=True, mode="json") for c in r.rejected_changes],
             "failures": [f.model_dump(by_alias=True, mode="json") for f in r.failures],
         })
         _write_json(reports / "semantic-diff.json", {
@@ -90,10 +98,16 @@ class OutputWriter:
             "status": r.status.value, "reasons": r.reasons, "source": r.source.source_file,
             "sourceVersion": r.source.source_version.value, "targetVersion": r.source.target_version.value,
             "iterations": len(r.iterations), "finalIteration": r.final_iteration,
-            "exitConditions": [{"iteration": it.iteration, **it.exit_conditions.model_dump(by_alias=True)}
-                               for it in r.iterations],
+            "output": {"iteration": r.final_iteration, "isBaseline": r.output_is_baseline, "note": r.output_note},
+            "baselineCounts": r.baseline_counts, "finalCounts": r.final_counts,
+            "exitConditions": [{"iteration": it.iteration, "rejected": it.rejected,
+                                **it.exit_conditions.model_dump(by_alias=True)} for it in r.iterations],
+            "rejectedIterations": [{"iteration": it.iteration, "reasons": it.rejection_reasons}
+                                   for it in r.iterations if it.rejected],
             "finalValidation": count_by_severity(r.final_validation),
             "finalGovernance": count_by_severity(r.final_governance),
             "compileFailedRules": r.compile_failed_rules,
+            "timings": r.timings,
+            "llmByRole": r.llm_stats,
             "llmCalls": r.llm_calls, "elapsedSeconds": r.elapsed_seconds,
         })

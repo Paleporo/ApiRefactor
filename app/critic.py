@@ -110,13 +110,21 @@ class CriticReport(BaseModel):
     failed_fragments: list[str] = Field(default_factory=list, alias="failedFragments")
     model_accepted: dict[str, bool] = Field(default_factory=dict, alias="modelAccepted")
     issues: list[ReviewedIssue] = Field(default_factory=list)
+    skipped: bool = False
+    skip_reason: str | None = Field(None, alias="skipReason")
+
+    @classmethod
+    def skipped_for(cls, iteration: int, reason: str) -> "CriticReport":
+        """Critic non invocato: il candidato non è accettabile per motivi deterministici (non è 'accettato')."""
+        return cls(iteration=iteration, accepted=False, skipped=True, skip_reason=reason)
 
     @property
     def blocking(self) -> list[ReviewedIssue]:
         return [i for i in self.issues if i.blocking]
 
     def dump(self) -> dict[str, Any]:
-        return {"iteration": self.iteration, "accepted": self.accepted, "reviewedFragments": self.reviewed_fragments,
+        return {"iteration": self.iteration, "accepted": self.accepted, "skipped": self.skipped,
+                "skipReason": self.skip_reason, "reviewedFragments": self.reviewed_fragments,
                 "failedFragments": self.failed_fragments, "modelAccepted": self.model_accepted,
                 "issues": [i.dump() for i in self.issues]}
 

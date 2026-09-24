@@ -25,11 +25,13 @@ class RuleEvaluator:
         for rule in rules:
             if rule.overridden_by:
                 continue  # in conflitto con una regola deterministica che prevale (riportato nel report regole)
-            for req in rule.requirements:
+            for idx, req in enumerate(rule.requirements):
                 handler = getattr(self, f"_eval_{req.kind}", None)
                 if handler is None:
                     continue  # judgment: competenza del Critic
-                out.extend(handler(rule, req))
+                for violation in handler(rule, req):
+                    violation.requirement_index = idx
+                    out.append(violation)
         return out
 
     # ── helper ─────────────────────────────────────────────────────────

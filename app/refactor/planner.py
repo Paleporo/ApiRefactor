@@ -1,9 +1,14 @@
 """RefactoringPlanner: produce un piano di RefactorOperation tipizzate, distinto dall'esecuzione, e lo valida.
 
-Validazione del piano (prima di eseguirlo): ruleId sconosciuti, operazioni in conflitto tra loro
-(due rename diversi dello stesso elemento, rename verso un nome già esistente, definizioni diverse dello
-stesso componente, set/remove sullo stesso campo). In un conflitto tra un'operazione motivata da una regola
-Spectral (deterministica) e una motivata da una regola LLM, vince la prima; negli altri casi entrambe sono scartate.
+Il piano unisce le correzioni deterministiche (app/refactor/deterministic.py) e le proposte dell'LLM per le
+violazioni che restano. Validazione del piano (prima di eseguirlo):
+- target con `/` non escapati normalizzati se la correzione è univoca;
+- un'operazione proposta dall'LLM deve citare il ruleId di una violazione del suo frammento di origine
+  (quelle mostrate all'LLM): altrimenti è scartata (niente modifiche "per scrupolo" senza violazioni);
+- SET_FIELD che sovrascrive un oggetto non vuoto richiede una violazione di quella regola su quell'elemento;
+- operazioni in conflitto tra loro (due rename diversi dello stesso elemento, rename verso un nome già
+  esistente, definizioni diverse dello stesso componente, set/remove sullo stesso campo): prevale
+  l'operazione deterministica o motivata da una regola Spectral; negli altri casi sono scartate tutte.
 """
 
 from __future__ import annotations
@@ -21,6 +26,8 @@ from app.model.issues import Violation
 from app.model.refs import RefIndex
 from app.prompts import load_prompt
 from app.refactor import operations as ops
+from app.model import pointer as jp
+from app.refactor.engine import normalize_targets
 from app.refactor.fragments import Fragment, build_slice, render
 from app.rules.models import CompiledRule, SpectralRule
 from app.rules.registry import RuleRegistry
@@ -37,7 +44,7 @@ _PHASE = {
 
 class PlanIssue(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    kind: str  # UNKNOWN_RULE | CONFLICT | DUPLICATE_TARGET | LLM_FAILED
+    kind: str  # RULE_WITHOUT_VIOLATION | SET_FIELD_UNJUSTIFIED | TARGET_NORMALIZED | CONFLICT | LLM_FAILED
     message: str
     rule_ids: list[str] = Field(default_factory=list, alias="ruleIds")
     rejected: list[dict[str, Any]] = Field(default_factory=list)
@@ -118,22 +125,48 @@ class PlanValidator:
     def __init__(self, registry: RuleRegistry):
         self.registry = registry
 
-    def _is_mechanical(self, rule_id: str) -> bool:
-        return isinstance(self.registry.get(rule_id), SpectralRule) or rule_id.startswith(("OAS-", "DIFF-"))
+    def _is_mechanical(self, p: ops.PlannedOperation) -> bool:
+        rule_id = p.operation.rule_id
+        return (p.proposed_by == "deterministic" or isinstance(self.registry.get(rule_id), SpectralRule)
+                or rule_id.startswith(("OAS-", "DIFF-")))
 
     def validate(self, doc: SpecDocument, planned: list[ops.PlannedOperation],
-                 known_rule_ids: set[str]) -> tuple[list[ops.PlannedOperation], list[PlanIssue]]:
+                 evidence: dict[str, list[tuple[str, str]]]) -> tuple[list[ops.PlannedOperation], list[PlanIssue]]:
+        """`evidence`: per frammento di origine, le violazioni (ruleId, path) mostrate all'LLM."""
         issues: list[PlanIssue] = []
         accepted: list[ops.PlannedOperation] = []
 
-        # 1) tracciabilità: ogni operazione deve citare una regola/violazione esistente
         for p in planned:
-            rid = p.operation.rule_id
-            if self.registry.get(rid) is None and rid not in known_rule_ids:
-                issues.append(PlanIssue(kind="UNKNOWN_RULE", message=f"{p.operation.type} cita un ruleId sconosciuto '{rid}'",
-                                        rule_ids=[rid], rejected=[p.dump()]))
-            else:
-                accepted.append(p)
+            # 0) target robusti: `/` non escapati corretti se univoci (anche per riconoscere i duplicati)
+            normalized, note = normalize_targets(doc, p.operation)
+            if note:
+                p = p.model_copy(update={"operation": normalized})
+                issues.append(PlanIssue(kind="TARGET_NORMALIZED", message=f"{p.operation.type}: {note}",
+                                        rule_ids=[p.operation.rule_id]))
+            if p.proposed_by == "deterministic":
+                accepted.append(p)  # derivate dalle violazioni per costruzione
+                continue
+            op, rid = p.operation, p.operation.rule_id
+            seen = [path for r, path in evidence.get(p.fragment, []) if r == rid]
+            # 1) l'LLM può agire solo su violazioni presenti nel frammento di origine
+            if not seen:
+                issues.append(PlanIssue(
+                    kind="RULE_WITHOUT_VIOLATION",
+                    message=f"{op.type} cita {rid!r}, che non ha violazioni nel frammento {p.fragment!r}: scartata",
+                    rule_ids=[rid], rejected=[p.dump()]))
+                continue
+            # 2) SET_FIELD che sovrascrive un oggetto non vuoto: serve una violazione su quell'elemento
+            if op.type == "SET_FIELD":
+                before = doc.get(op.target)
+                if isinstance(before, dict) and before and before != op.value \
+                        and not any(jp.is_prefix(op.target, path) for path in seen):
+                    issues.append(PlanIssue(
+                        kind="SET_FIELD_UNJUSTIFIED",
+                        message=f"SET_FIELD sovrascrive l'oggetto {op.target} ma nessuna violazione di {rid!r} "
+                                "riguarda quell'elemento: scartata",
+                        rule_ids=[rid], rejected=[p.dump()]))
+                    continue
+            accepted.append(p)
 
         # 2) duplicati identici -> uno solo; stesso elemento con payload diversi -> conflitto
         by_key: dict[tuple, list[ops.PlannedOperation]] = {}
@@ -148,14 +181,14 @@ class PlanValidator:
                 survivors.append(next(iter(distinct.values())))
                 continue
             candidates = list(distinct.values())
-            mechanical = [p for p in candidates if self._is_mechanical(p.operation.rule_id)]
+            mechanical = [p for p in candidates if self._is_mechanical(p)]
             mech_payloads = {repr(sorted(_payload(p.operation).items())) for p in mechanical}
             if len(mech_payloads) == 1:
                 winner = mechanical[0]
                 survivors.append(winner)
                 issues.append(PlanIssue(
-                    kind="CONFLICT", message=f"operazioni in conflitto su {key}: prevale quella motivata dalla regola "
-                                             f"deterministica {winner.operation.rule_id}",
+                    kind="CONFLICT", message=f"operazioni in conflitto su {key}: prevale quella deterministica "
+                                             f"({winner.proposed_by}, {winner.operation.rule_id})",
                     rule_ids=sorted({p.operation.rule_id for p in candidates}),
                     rejected=[p.dump() for p in candidates if p is not winner], kept=winner.dump()))
             else:
@@ -224,9 +257,11 @@ class RefactoringPlanner:
         return await self.llm.generate(request, ops.OperationsProposal)
 
     async def plan(self, doc: SpecDocument, refs: RefIndex, targets: list[tuple[Fragment, list[Violation]]],
-                   iteration: int, known_rule_ids: set[str]) -> RefactoringPlan:
+                   iteration: int, deterministic: list[ops.PlannedOperation] | None = None) -> RefactoringPlan:
+        """`targets`: frammenti con le sole violazioni senza correzione deterministica (le vede l'LLM)."""
         plan = RefactoringPlan(iteration=iteration)
-        proposed: list[ops.PlannedOperation] = []
+        proposed: list[ops.PlannedOperation] = list(deterministic or [])
+        evidence = {(f.pointer or "/"): [(v.rule_id, v.path) for v in vs] for f, vs in targets}
         for fragment, violations in targets:
             try:
                 proposal = await self.propose_for_fragment(doc, refs, fragment, violations)
@@ -238,8 +273,10 @@ class RefactoringPlanner:
             plan.rationales[fragment.pointer or "/"] = proposal.rationale
             proposed.extend(ops.PlannedOperation(operation=o, fragment=fragment.pointer or "/", proposed_by="refactor")
                             for o in proposal.operations)
-        plan.operations, validation_issues = self.validator.validate(doc, proposed, known_rule_ids)
+        plan.operations, validation_issues = self.validator.validate(doc, proposed, evidence)
         plan.issues.extend(validation_issues)
-        log.info("[PLAN] %d operazioni proposte, %d nel piano validato, %d problemi di piano",
-                 len(proposed), len(plan.operations), len(plan.issues))
+        det = sum(1 for p in proposed if p.proposed_by == "deterministic")
+        log.info("[PLAN] %d operazioni proposte (%d deterministiche, %d LLM su %d frammenti), %d nel piano validato, "
+                 "%d problemi di piano", len(proposed), det, len(proposed) - det, len(targets), len(plan.operations),
+                 len(plan.issues))
         return plan

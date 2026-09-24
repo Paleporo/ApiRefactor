@@ -46,11 +46,15 @@ class CorrectionEngine:
 
     async def correct(self, *, iteration: int, baseline: SpecDocument, candidate: SpecDocument,
                       targets: list[tuple[Fragment, list[Problem], str]], applied: list[ops.AppliedChange],
-                      known_rule_ids: set[str]) -> RefactoringPlan:
-        """`targets`: (frammento nel candidato, problemi, pointer del frammento nel documento originale)."""
+                      deterministic: list[ops.PlannedOperation] | None = None,
+                      previous_rejection: dict[str, Any] | None = None) -> RefactoringPlan:
+        """`targets`: (frammento nel candidato, problemi senza correzione deterministica, pointer del frammento
+        nel documento originale). `previous_rejection`: tentativo di correzione precedente scartato perché
+        peggiorava il candidato, mostrato al modello per non ripeterlo."""
         plan = RefactoringPlan(iteration=iteration)
         refs = RefIndex(candidate.data)
-        proposed: list[ops.PlannedOperation] = []
+        proposed: list[ops.PlannedOperation] = list(deterministic or [])
+        evidence = {(f.pointer or "/"): [(p.rule_id, p.location) for p in problems] for f, problems, _ in targets}
         for fragment, problems, original_ptr in targets:
             ptr = fragment.pointer
             original = None
@@ -65,6 +69,8 @@ class CorrectionEngine:
                 "rules": [describe_rule(r) for r in self.registry.for_fragment(fragment.kind, fragment.method,
                                                                                fragment.path)],
             }
+            if previous_rejection:
+                payload["previousAttemptRejected"] = previous_rejection
             request = LlmRequest(role=AgentRole.CORRECTION, task="correct-fragment", system=self.system,
                                  user="## Correction input\n" + render(payload) + "\n\nPropose targeted operations (JSON).",
                                  context={"fragment": ptr, "iteration": iteration,
@@ -80,8 +86,9 @@ class CorrectionEngine:
             plan.rationales[ptr or "/"] = proposal.rationale
             proposed.extend(ops.PlannedOperation(operation=o, fragment=ptr or "/", proposed_by="correction")
                             for o in proposal.operations)
-        plan.operations, issues = self.validator.validate(candidate, proposed, known_rule_ids)
+        plan.operations, issues = self.validator.validate(candidate, proposed, evidence)
         plan.issues.extend(issues)
-        log.info("[CORRECTION] %d frammenti, %d operazioni proposte, %d nel piano validato",
-                 len(targets), len(proposed), len(plan.operations))
+        det = sum(1 for p in proposed if p.proposed_by == "deterministic")
+        log.info("[CORRECTION] %d frammenti all'LLM, %d operazioni proposte (%d deterministiche), %d nel piano validato",
+                 len(targets), len(proposed), det, len(plan.operations))
         return plan

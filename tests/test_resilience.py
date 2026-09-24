@@ -56,7 +56,8 @@ async def test_preflight_fails_fast_when_ollama_unreachable():
 @pytest.mark.needs_node
 async def test_failed_fragments_are_reported_and_prevent_success(config, agents, rules_dir):
     agents.refactor = lambda r: LlmCallError("modello caduto")
-    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-003-no-problem-details.yaml")
+    # caso 002: i rename (nameCasing) restano all'LLM, che qui fallisce
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-002-naming.yaml")
     assert result.plans[0].failed_fragments
     assert result.status == RunStatus.NEEDS_REVIEW
     assert any("chiamate LLM fallite" in r for r in result.reasons)
@@ -102,10 +103,16 @@ async def test_ollama_provider_request_shape_and_preflight_with_mock_transport()
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/show":
+            name = json.loads(request.content)["model"]
+            caps = ["completion", "thinking"] if name.startswith("deepseek") else ["completion"]
+            return httpx.Response(200, json={"modelfile": "", "parameters": "", "template": "", "details": {},
+                                             "model_info": {}, "capabilities": caps})
         if request.url.path == "/api/tags":
             return httpx.Response(200, json={"models": [{"model": "qwen3-coder:30b", "name": "qwen3-coder:30b"},
                                                         {"model": "deepseek-r1:14b", "name": "deepseek-r1:14b"}]})
-        seen["body"] = json.loads(request.content)
+        seen.setdefault("bodies", []).append(json.loads(request.content))
+        seen["body"] = seen["bodies"][-1]
         return httpx.Response(200, json={"model": "qwen3-coder:30b", "created_at": "2026-01-01T00:00:00Z",
                                          "done": True, "message": {"role": "assistant",
                                                                    "content": '{"operations": [], "rationale": "x"}'}})
@@ -121,3 +128,13 @@ async def test_ollama_provider_request_shape_and_preflight_with_mock_transport()
     assert body["options"]["num_ctx"] == config.llm_context_token_budget + 4096
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
     assert provider.model_for(AgentRole.CRITIC) == "deepseek-r1:14b"
+    assert "think" not in body  # qwen3-coder non ha la capability "thinking": il parametro non viene passato
+
+    # Critic su un modello "thinking": `think` passato esplicitamente, false di default (criticThink)
+    critic_req = REQ.model_copy(update={"role": AgentRole.CRITIC})
+    await StructuredLlm(provider, 5, 0).generate(critic_req, OperationsProposal)
+    assert seen["body"]["model"] == "deepseek-r1:14b" and seen["body"]["think"] is False
+
+    provider.config = config.with_overrides(critic_think=True)
+    await StructuredLlm(provider, 5, 0).generate(critic_req, OperationsProposal)
+    assert seen["body"]["think"] is True

@@ -30,6 +30,14 @@ def planned(*ops) -> list[PlannedOperation]:
     return [PlannedOperation(operation=o) for o in OperationsProposal.model_validate({"operations": list(ops)}).operations]
 
 
+SCHEMA = "/components/schemas/order"
+
+
+def evidence(*items: tuple[str, str]) -> dict[str, list[tuple[str, str]]]:
+    """Violazioni (ruleId, path) mostrate all'LLM nel frammento di origine (qui "", il default dei test)."""
+    return {"": list(items)}
+
+
 def registry() -> RuleRegistry:
     spectral = SpectralRule(id="SPEC-1", description="d", severity="ERROR", given="$", scope=RuleScope.ANY,
                             rulesetFile="r.yaml")
@@ -40,11 +48,11 @@ def test_plan_rejects_conflicting_renames_and_rename_to_existing_name():
     ops, issues = PlanValidator(registry()).validate(doc(), planned(
         {"type": "RENAME_SCHEMA", "from": "order", "to": "PurchaseOrder", "ruleId": "LLM-1"},
         {"type": "RENAME_SCHEMA", "from": "order", "to": "SalesOrder", "ruleId": "LLM-2"},
-    ), known_rule_ids={"LLM-1", "LLM-2"})
+    ), evidence(("LLM-1", SCHEMA), ("LLM-2", SCHEMA)))
     assert ops == [] and issues[0].kind == "CONFLICT" and len(issues[0].rejected) == 2
 
     ops, issues = PlanValidator(registry()).validate(doc(), planned(
-        {"type": "RENAME_SCHEMA", "from": "order", "to": "Order", "ruleId": "LLM-1"}), known_rule_ids={"LLM-1"})
+        {"type": "RENAME_SCHEMA", "from": "order", "to": "Order", "ruleId": "LLM-1"}), evidence(("LLM-1", SCHEMA)))
     assert ops == [] and "duplicato" in issues[0].message
 
 
@@ -52,18 +60,18 @@ def test_plan_conflict_prefers_the_deterministic_rule_and_reports_it():
     ops, issues = PlanValidator(registry()).validate(doc(), planned(
         {"type": "RENAME_SCHEMA", "from": "order", "to": "PurchaseOrder", "ruleId": "LLM-1"},
         {"type": "RENAME_SCHEMA", "from": "order", "to": "SalesOrder", "ruleId": "SPEC-1"},
-    ), known_rule_ids={"LLM-1"})
+    ), evidence(("LLM-1", SCHEMA), ("SPEC-1", SCHEMA)))
     assert [p.operation.to for p in ops] == ["SalesOrder"]
     assert issues[0].kept["ruleId"] == "SPEC-1"
 
 
-def test_plan_rejects_unknown_rule_ids_and_dedupes_identical_ops():
+def test_plan_rejects_ops_without_violation_and_dedupes_identical_ops():
     ops, issues = PlanValidator(registry()).validate(doc(), planned(
         {"type": "REMOVE_FIELD", "target": "/paths/~1orders/post/responses/404", "ruleId": "MADE-UP"},
         {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "ruleId": "SPEC-1"},
         {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "ruleId": "SPEC-1"},
-    ), known_rule_ids=set())
-    assert [i.kind for i in issues] == ["UNKNOWN_RULE"]
+    ), evidence(("SPEC-1", "/paths/~1orders/post")))
+    assert [i.kind for i in issues] == ["RULE_WITHOUT_VIOLATION"]
     assert len(ops) == 1
 
 

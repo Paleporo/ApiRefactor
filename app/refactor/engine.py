@@ -70,6 +70,30 @@ def _require_operation(doc: SpecDocument, pointer: str) -> dict:
     return node
 
 
+POINTER_FIELDS = ("target", "source")
+CREATES_LEAF = {"SET_FIELD"}
+
+
+def normalize_targets(doc: SpecDocument, op):
+    """Corregge i target con `/` non escapati (es. `.../content/application/json`) se la correzione è univoca.
+
+    Ritorna (operazione, nota); se nulla cambia la nota è vuota. Un target non risolvibile resta com'è e
+    l'applicazione fallirà in modo esplicito, come prima.
+    """
+    updates, notes = {}, []
+    for field in POINTER_FIELDS:
+        value = getattr(op, field, None)
+        if not isinstance(value, str) or not value or doc.exists(value):
+            continue
+        fixed = jp.normalize(doc.data, value, allow_new_leaf=op.type in CREATES_LEAF)
+        if fixed and fixed != value:
+            updates[field] = fixed
+            notes.append(f"{field} normalizzato da {value!r} a {fixed!r}")
+    if not updates:
+        return op, ""
+    return op.model_copy(update=updates), "; ".join(notes)
+
+
 class RefactoringEngine:
     def apply(
         self, doc: SpecDocument, planned: list[ops.PlannedOperation], iteration: int = 0
@@ -79,7 +103,7 @@ class RefactoringEngine:
         applied: list[AppliedChange] = []
         failures: list[ApplyFailure] = []
         for item in planned:
-            op = item.operation
+            op, note = normalize_targets(result, item.operation)
             snapshot = copy.deepcopy(result.data)
             try:
                 change = getattr(self, f"_apply_{op.type.lower()}")(result, op)
@@ -95,6 +119,8 @@ class RefactoringEngine:
                 log.debug("[ENGINE] %s (%s): nessun effetto (già conforme)", op.type, op.rule_id)
                 continue
             change.iteration = iteration
+            if note:
+                change.description += f" ({note})"
             applied.append(change)
             log.debug("[ENGINE] %s [%s] %s", change.category.value, op.rule_id, change.description)
         return result, applied, failures
@@ -396,8 +422,11 @@ class RefactoringEngine:
         if before == op.value:
             return None
         jp.set_value(doc.data, op.target, copy.deepcopy(op.value))
+        # sovrascrivere un oggetto non vuoto con un contenuto diverso cambia il contratto, anche sotto /info
+        overwrite = isinstance(before, dict) and bool(before)
         return AppliedChange(type=op.type, rule_id=op.rule_id,
-                             category=ChangeCategory.GOVERNANCE if _doc_only(op.target) else ChangeCategory.SEMANTIC,
+                             category=ChangeCategory.GOVERNANCE if _doc_only(op.target) and not overwrite
+                             else ChangeCategory.SEMANTIC,
                              locations=[op.target], description=f"impostato {op.target}", before=before, after=op.value)
 
     def _apply_remove_field(self, doc: SpecDocument, op: ops.RemoveField) -> AppliedChange | None:

@@ -45,6 +45,17 @@ async def test_ollama_compiles_rules_and_refactors_case_003(ollama_config, rules
         for op in item.values():
             assert not any(p.get("name") == "Idempotency-Key" for p in op.get("parameters", []))
     assert not [c for c in result.final_diff if "Idempotency-Key" in json.dumps(c.dump())]
+    # nessuna regressione: l'output non ha più ERROR della baseline e le violazioni di formato errore sono risolte
+    assert result.final_counts["errors"] <= result.baseline_counts["errors"]
+    assert any(v.rule_id in ("ERR-001", "DE-STATUS-002-problem-json-errors") for v in result.baseline_governance)
+    assert not [v for v in result.final_governance if v.rule_id in ("ERR-001", "DE-STATUS-002-problem-json-errors")]
+    # le conversioni degli errori sono deterministiche, non proposte dall'LLM
+    converted = [p for p in result.plans[0].operations if p.operation.type == "CONVERT_ERROR_RESPONSE"]
+    assert converted and all(p.proposed_by == "deterministic" for p in converted)
+    # il Critic non gira su candidati con ERROR di governance
+    for it in result.iterations:
+        if [v for v in it.governance if v.severity == "ERROR"]:
+            assert it.critic.skipped
 
 
 async def test_ollama_upgrades_swagger2(ollama_config, rules_dir):

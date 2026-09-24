@@ -188,7 +188,11 @@ async def test_case_005_persistent_regression_needs_review(config, agents, rules
 
     assert len(result.iterations) == config.max_iterations
     assert result.status == RunStatus.NEEDS_REVIEW  # mai dichiarare successo dopo maxIterations
-    assert any("Critic" in r for r in result.reasons)
+    assert all(not it.exit_conditions.critic_accepted for it in result.iterations)
+    # ogni candidato perde la 404 (1 ERROR non tracciato) quanto la baseline ne aveva uno (Idempotency-Key):
+    # nessuno migliora la baseline, quindi l'output è l'originale, mai un candidato con la regressione
+    assert result.output_is_baseline and result.final.data == result.baseline.data
+    assert any("nessun candidato migliora la baseline" in r for r in result.reasons)
 
 
 async def test_case_005_false_critic_claim_is_refuted(config, agents, rules_dir, tmp_path):

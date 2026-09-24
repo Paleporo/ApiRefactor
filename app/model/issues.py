@@ -35,6 +35,8 @@ class Violation(BaseModel):
     actual: Any = None
     suggested_fix: str | None = Field(None, alias="suggestedFix")
     source: ViolationSource
+    # uso interno: indice del requisito della regola compilata che ha prodotto la violazione (non nei report)
+    requirement_index: int | None = Field(None, exclude=True)
 
     def dump(self) -> dict[str, Any]:
         return self.model_dump(by_alias=True, mode="json")

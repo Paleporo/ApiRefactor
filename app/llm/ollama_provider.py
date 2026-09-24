@@ -22,14 +22,29 @@ class OllamaProvider(LlmProvider):
             AgentRole.CRITIC: config.critic_model,
         }
         self.client = ollama.AsyncClient(host=config.ollama_host, timeout=config.llm_call_timeout_seconds)
+        self._thinking: dict[str, bool] = {}  # modello -> supporta il parametro `think` (capability "thinking")
+
+    async def supports_thinking(self, model: str) -> bool:
+        if model not in self._thinking:
+            try:
+                info = await self.client.show(model)
+                self._thinking[model] = "thinking" in (info.capabilities or [])
+            except Exception:  # noqa: BLE001 - sonda opzionale: qualunque errore = capacità ignota, mai bloccante
+                self._thinking[model] = False  # capacità ignota: non si passa `think`
+        return self._thinking[model]
 
     def model_for(self, role: AgentRole) -> str:
         return self.models[role]
 
     async def complete(self, request: LlmRequest, json_schema: dict[str, Any], timeout: float) -> str:
+        model = self.model_for(request.role)
+        extra: dict[str, Any] = {}
+        if request.role == AgentRole.CRITIC and await self.supports_thinking(model):
+            # esplicito anche quando è false: i modelli reasoning (es. deepseek-r1) ragionano di default
+            extra["think"] = self.config.critic_think
         try:
             response = await self.client.chat(
-                model=self.model_for(request.role),
+                model=model,
                 messages=[
                     {"role": "system", "content": request.system},
                     {"role": "user", "content": request.user},
@@ -40,6 +55,7 @@ class OllamaProvider(LlmProvider):
                     # il default di Ollama (2-4K) troncherebbe i frammenti: budget + margine per la risposta
                     "num_ctx": self.config.llm_context_token_budget + 4096,
                 },
+                **extra,
             )
         except (ollama.ResponseError, httpx.HTTPError, ConnectionError) as exc:
             raise LlmCallError(f"errore Ollama: {exc}") from exc
@@ -62,3 +78,4 @@ class OllamaProvider(LlmProvider):
         if missing:
             pulls = " && ".join(f"ollama pull {m}" for m in missing)
             raise PreflightError(f"Modelli Ollama non presenti localmente: {', '.join(missing)}. Esegui: {pulls}")
+        await self.supports_thinking(self.config.critic_model)

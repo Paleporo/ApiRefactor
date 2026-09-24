@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -69,6 +70,14 @@ class StructuredLlm:
         self.technical_retries = technical_retries
         self.deadline = deadline
         self.calls = 0
+        # per ruolo: chiamate (tentativi), secondi totali, tentativi falliti
+        self.stats: dict[str, dict[str, float]] = {}
+
+    def _record(self, role: str, seconds: float, failed: bool) -> None:
+        s = self.stats.setdefault(role, {"calls": 0, "seconds": 0.0, "failures": 0})
+        s["calls"] += 1
+        s["seconds"] = round(s["seconds"] + seconds, 3)
+        s["failures"] += int(failed)
 
     async def generate(self, request: LlmRequest, response_model: type[T],
                        check: Callable[[T], None] | None = None) -> T:
@@ -90,16 +99,23 @@ class StructuredLlm:
                 (len(current.system) + len(current.user)) // 4, current.system, current.user,
             )
             self.calls += 1
+            started = time.monotonic()
             try:
                 raw = await asyncio.wait_for(self.provider.complete(current, schema, timeout), timeout=timeout)
             except asyncio.TimeoutError:
+                self._record(request.role.value, time.monotonic() - started, failed=True)
                 last_error = f"timeout dopo {timeout:.0f}s"
                 log.warning("[LLM] %s: %s (tentativo %d/%d)", request.task, last_error, attempt, attempts)
                 continue
             except LlmCallError as exc:
+                self._record(request.role.value, time.monotonic() - started, failed=True)
                 last_error = str(exc)
                 log.warning("[LLM] %s: %s (tentativo %d/%d)", request.task, last_error, attempt, attempts)
                 continue
+            elapsed = time.monotonic() - started
+            self._record(request.role.value, elapsed, failed=False)
+            log.info("[LLM] %s/%s %s: %.1fs", request.role.value, request.task,
+                     request.context.get("fragment") or request.context.get("ruleId") or "", elapsed)
             log.debug("[LLM] <- %s/%s risposta:\n%s", request.role.value, request.task, raw)
             try:
                 result = response_model.model_validate_json(extract_json(raw))

@@ -165,17 +165,25 @@ output/<api-name>/
     original/<file>                  copia byte per byte del sorgente (mai modificato)
     refactored/<api-name>.yaml|json  candidato finale, stesso formato dell'input
     reports/
-        refactoring-plan.json        piano iniziale + piani di correzione: operazioni, frammento di origine,
-                                     rationale dell'LLM, problemi del piano (conflitti, ruleId sconosciuti)
+        refactoring-plan.json        piano iniziale + piani di correzione: operazioni (con `proposedBy`:
+                                     deterministic / refactor / correction), frammento di origine, rationale
+                                     dell'LLM, problemi del piano (operazioni senza violazioni, SET_FIELD non
+                                     motivati, target normalizzati, conflitti)
         validation-report.json       validazione OpenAPI per iterazione e finale + warning di swagger2openapi
         governance-report.json       violazioni Spectral + regole compilate per iterazione e finali; regole
                                      compilate, conflitti tra regole, avvisi, uso della cache
         critic-report.json           verdetti del Critic per iterazione, con l'esito della verifica
-                                     deterministica di ogni claim; stato per frammento
+                                     deterministica di ogni claim; `skipped`/`skipReason` quando non è
+                                     stato invocato; stato per frammento
         changes.json                 AppliedChange (tipo, ruleId, STRUCTURAL/GOVERNANCE/SEMANTIC, posizioni,
-                                     before/after), elenco dei cambi SEMANTIC, operazioni non applicabili
+                                     before/after, `inFinalOutput`), elenco dei cambi SEMANTIC dell'output,
+                                     modifiche dei candidati scartati (`rejected`), operazioni non applicabili
         semantic-diff.json           diff semantico original → refactored (breaking / expected)
-        summary.json                 stato finale, motivazioni, condizioni di uscita per iterazione, tempi
+        summary.json                 stato finale e motivazioni; `output` (iterazione scelta, `isBaseline`,
+                                     nota); `baselineCounts` / `finalCounts` (ERROR, WARNING); condizioni di
+                                     uscita e iterazioni scartate (`rejectedIterations`); `compileFailedRules`;
+                                     `timings` per fase (compile, plan, engine, validation, critic,
+                                     correction, total) e `llmByRole` (chiamate, secondi, fallimenti)
 ```
 
 Stato finale:
@@ -190,8 +198,12 @@ Stato finale:
   `line`, `reason`) e il motivo compare anche in `reasons`. Serve una revisione umana.
 - **FAILED**: il candidato finale non è una specifica OpenAPI valida.
 
-Se l'ultima iterazione produce un documento non valido, l'output è l'ultimo candidato valido, e il report
-lo segnala.
+L'output è il **miglior candidato visto**: prima uno OpenAPI valido, poi quello con meno ERROR, poi quello
+con meno WARNING; a parità di questi, quello accettato dal Critic e poi il più recente. Il conteggio include
+ERROR e WARNING di validazione, governance e semantic diff. L'output non è mai peggiore della baseline: se
+nessun candidato la migliora in senso stretto, l'output coincide con l'originale (convertito alla versione
+target, se serviva). `summary.json` lo dice esplicitamente in `output.isBaseline` e `output.note`, e in quel
+caso lo stato è NEEDS_REVIEW, se la baseline ha violazioni.
 
 ---
 
@@ -269,6 +281,63 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   cache è invalidata dallo SHA-256 del file, dal modello usato e dalla versione del DSL: se un file cambia,
   viene ricompilato per intero. Le compilazioni fallite non vengono salvate, quindi alla run successiva si
   ritenta. Nel frattempo la regola resta attiva come regola di giudizio, marcata `compileFailed`.
+- **Correzioni deterministiche** (`app/refactor/deterministic.py`). Le violazioni dei requisiti meccanici
+  con una correzione nota vengono corrette senza LLM, con operazioni tracciate dal loro `ruleId`
+  (`proposedBy: deterministic`):
+
+  | Requisito | Operazioni |
+  | --- | --- |
+  | `errorFormat` | `ADD_COMPONENT` Problem (solo se non c'è già uno schema conforme) + `CONVERT_ERROR_RESPONSE` |
+  | `requireOperationId` | `ADD_OPERATION_ID` |
+  | `requireHeader` | `ADD_HEADER` |
+  | `requireQueryParameter` | `ADD_QUERY_PARAMETER` |
+  | `requireResponse` | `ADD_RESPONSE` |
+  | `requireSecurity` (http) | `ADD_SECURITY_SCHEME` (se manca) + `SET_SECURITY_REQUIREMENT` |
+
+  Il Refactor Agent e il Correction Engine ricevono solo il resto: `nameCasing`, violazioni Spectral e del
+  validator senza mapping. Non ricevono nemmeno le violazioni che cadono su una response già riscritta da una
+  correzione deterministica, per esempio DE-STATUS-002 sulla stessa response di ERR-001, che altrimenti
+  porterebbero a modifiche concorrenti. Restano all'LLM, per scelta, i casi in cui la correzione non è
+  deducibile:
+  - security scheme `apiKey`, `oauth2` e `openIdConnect` (servono nome dell'header, flussi o URL);
+  - operation che hanno già altri security requirement, perché sostituirli cambierebbe chi può accedere;
+  - response definite via `$ref`.
+
+  Valori generati:
+  - **operationId:** `<metodo><SegmentiStatici>[By<Parametri>]`, per esempio GET `/accounts/{account-id}` →
+    `getAccountsByAccountId`, con suffisso numerico se è già usato;
+  - **description di una response aggiunta:** la reason phrase HTTP, per esempio `Not Found`;
+  - **schema Problem (RFC 9457):** `type` (uri), `title`, `status` (integer int32), `detail`, `instance`
+    (uri-reference), più le proprietà richieste dalla regola, come string e in `required`. Si chiama
+    `Problem`, oppure `ProblemDetails` se esiste già un `Problem` non conforme;
+  - **nome del security scheme:** quello di uno scheme conforme già definito, altrimenti `<scheme>Auth`;
+  - **header e query parameter aggiunti:** schema `{"type": "string"}`.
+- **Validazione del piano.**
+  - Un'operazione proposta dall'LLM deve citare il `ruleId` di una violazione mostrata per il suo frammento
+    di origine; altrimenti viene scartata e riportata (`RULE_WITHOUT_VIOLATION`). Niente modifiche "per
+    scrupolo", come un security scheme senza violazioni di sicurezza. Ne segue che le regole di giudizio non
+    generano operazioni: restano al Critic.
+  - Un `SET_FIELD` che sovrascrive un oggetto non vuoto con un contenuto diverso richiede una violazione di
+    quella regola su quell'elemento (`SET_FIELD_UNJUSTIFIED`) ed è sempre classificato SEMANTIC.
+- **Target robusti.** Se un target non esiste, si prova a leggere i `/` non escapati come parte dei nomi, per
+  esempio `.../content/application/json` → `.../content/application~1json`. La correzione si usa solo se
+  esiste un'unica lettura esistente; altrimenti l'operazione fallisce in modo esplicito, come prima. La
+  normalizzazione avviene già nella validazione del piano, così due operazioni scritte con escape diversi
+  vengono riconosciute come duplicate, e viene riportata nel piano e nella descrizione della modifica.
+  Per le operazioni sulle response ho valutato campi strutturati (path, metodo, status, media type) al posto
+  dei puntatori, e ho scelto di non introdurli: `CONVERT_ERROR_RESPONSE` ora è deterministica, quindi l'LLM
+  punta raramente alle response; la normalizzazione copre l'errore osservato; e una seconda forma di target
+  renderebbe più grande lo schema delle operazioni da generare, cosa che su CPU pesa.
+- **Critic solo quando serve.** Il Critic viene invocato solo su candidati OpenAPI validi e senza ERROR del
+  GovernanceValidator; altrimenti si passa direttamente alla correzione, e `critic-report.json` riporta
+  `skipped` con il motivo. Gli ERROR del semantic diff (`DIFF-UNTRACED-CHANGE`) non escludono il Critic,
+  perché individuare regressioni come una response persa è proprio il suo compito (CASE 005).
+- **Nessuna regressione tra iterazioni.** Una correzione che aumenta gli ERROR, o che introduce violazioni
+  nuove (ERROR o WARNING) su elementi prima conformi, viene scartata: il candidato corrente non cambia.
+  L'iterazione è registrata come `rejected`, con i motivi e le violazioni nuove, e la correzione successiva
+  riceve il tentativo scartato (`previousAttemptRejected`) per non ripeterlo. Il gate vale per le correzioni;
+  la prima proposta (V1) contro la baseline è coperta dalla scelta del miglior candidato. Una correzione
+  viene scartata per intero, anche se solo una parte delle sue operazioni peggiora il candidato.
 - **Precedenza nei conflitti.** Una regola Spectral (deterministica) prevale su una regola compilata
   dall'LLM che dà un'indicazione contraria sullo stesso elemento: per esempio `DE-JSON-001` (camelCase)
   contro una regola `.md` che chiede snake_case. Il conflitto è sempre riportato in `governance-report.json`
@@ -331,6 +400,13 @@ Ogni issue del Critic passa da una verifica deterministica prima di poter blocca
   timeout, errori di Ollama e output non conforme allo schema. In quest'ultimo caso l'errore di validazione
   viene passato al tentativo successivo. Esauriti i retry, il frammento è marcato come fallito e riportato,
   e la run non può chiudersi in SUCCESS.
+- **Durata delle chiamate.** Ogni chiamata LLM viene cronometrata: una riga di log INFO per chiamata, e i
+  totali per ruolo in `summary.json` (`llmByRole`).
+- **Ragionamento del Critic** (`criticThink`, default `false`). Il parametro `think` di Ollama viene passato
+  solo ai modelli che dichiarano la capability `thinking` (verificata con `ollama show`). Con `false` il
+  ragionamento esteso dei modelli come `deepseek-r1` viene disattivato esplicitamente, ed è il fattore che
+  pesa di più sui tempi del Critic su CPU. Con `true` il Critic ragiona più a lungo, per revisioni più
+  accurate.
 - **Timeout per chiamata** (`llmCallTimeoutSeconds`) e **budget della run** (`runTimeoutSeconds`). Il
   timeout di ogni chiamata è limitato al tempo residuo della run. Se il budget si esaurisce, la run esce in
   modo pulito con NEEDS_REVIEW, validazione finale deterministica e report delle violazioni residue.
@@ -348,6 +424,7 @@ Tutti i parametri stanno in un solo file. I flag CLI li sovrascrivono solo per l
 | `targetOpenApiVersion` | `"3.0"` | `"3.0"` o `"3.1"` |
 | `maxIterations` | `3` | candidati valutati al massimo nel feedback loop |
 | `refactorModel` / `criticModel` | `qwen3-coder:30b` / `deepseek-r1:14b` | modelli Ollama per ruolo |
+| `criticThink` | `false` | ragionamento esteso del Critic (solo modelli con capability `thinking`) |
 | `ollamaHost` | `http://localhost:11434` | |
 | `llmCallTimeoutSeconds` | `600` | timeout della singola chiamata (su CPU serve un valore alto) |
 | `llmTechnicalRetries` | `2` | retry tecnici per chiamata |
@@ -411,14 +488,18 @@ I test che richiedono i tool Node vengono saltati, con il motivo, se `spectral` 
 | --- | --- | --- |
 | CASE 001 | `apis/case-001-swagger2-legacy.yaml` | upgrade Swagger 2.0 → 3.0: stesse operation, schemi equivalenti, validazione OK, originale intatto |
 | CASE 002 | `apis/case-002-naming.yaml` | schema → PascalCase, proprietà → camelCase, `$ref` aggiornati, rename delle proprietà marcati SEMANTIC/breaking ma tracciati |
-| CASE 003 | `apis/case-003-no-problem-details.yaml` | errori convertiti in `application/problem+json` (RFC 9457), schema `Problem` aggiunto una sola volta |
+| CASE 003 | `apis/case-003-no-problem-details.yaml` | errori convertiti in `application/problem+json` (RFC 9457) in modo deterministico, schema `Problem` aggiunto una sola volta, anche con un LLM che propone operazioni sbagliate |
 | CASE 004 | `apis/case-004-incomplete-security.yaml` | security scheme bearer aggiunto, requirement su tutte le operation, restrizione marcata breaking e tracciata |
-| CASE 005 | `apis/case-005-regression-guard.yaml` | regressione simulata (404 rimossa senza motivo): il Critic la segnala, il claim è verificato sul diff e blocca l'accettazione, la correzione ripristina la 404. Con la regressione persistente → NEEDS_REVIEW dopo `maxIterations`. Un claim falso del Critic viene smentito e non blocca |
+| CASE 005 | `apis/case-005-regression-guard.yaml` | regressione simulata (404 rimossa senza motivo): il Critic la segnala, il claim è verificato sul diff e blocca l'accettazione, la correzione ripristina la 404. Con la regressione persistente nessun candidato migliora la baseline: dopo `maxIterations` lo stato è NEEDS_REVIEW e l'output è l'originale. Un claim falso del Critic viene smentito e non blocca |
 
 Altri test coprono: errori di parsing con riga e colonna, specifica vuota, `$ref` circolari, cache delle
 regole e sua invalidazione, collisioni di `ruleId`, conflitti tra regole e tra operazioni del piano, target
 mancanti nell'engine, tabella breaking, retry tecnici, timeout per chiamata e per run, preflight,
-pipeline senza regole, formato della richiesta a Ollama (con trasporto HTTP simulato).
+pipeline senza regole, formato della richiesta a Ollama (con trasporto HTTP simulato, incluso `think`).
+In `tests/test_feedback_loop.py`: correzioni deterministiche e valori generati, operazioni senza violazioni
+scartate, `SET_FIELD` non motivati, target normalizzati o ambigui, Critic non invocato con ERROR di
+governance, correzione peggiorativa scartata con output = miglior candidato, output = originale quando
+nessun candidato migliora, tempi per fase e chiamate per ruolo in `summary.json`.
 
 ---
 

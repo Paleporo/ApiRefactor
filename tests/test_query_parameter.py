@@ -120,7 +120,7 @@ def test_plan_conflict_on_same_query_parameter():
          "ruleId": "A"},
         {"type": "ADD_QUERY_PARAMETER", "target": "/paths/~1items/get", "name": "limit", "required": True,
          "ruleId": "B"},
-    ), known_rule_ids={"A", "B"})
+    ), {"": [("A", "/paths/~1items/get"), ("B", "/paths/~1items/get")]})
     assert ops == [] and issues[0].kind == "CONFLICT"
 
 
