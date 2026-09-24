@@ -5,7 +5,7 @@ targetOpenApiVersion: "3.0"        # "3.0" | "3.1"
 maxIterations: 3                   # iterazioni massime del feedback loop
 
 refactorModel: "qwen3-coder:30b"   # Refactor Agent + Correction Engine + Rule Interpreter
-criticModel: "deepseek-r1:14b"     # Critic Agent (ruolo separato)
+criticModel: "qwen3-coder:30b"     # Critic Agent (ruolo separato)
 criticThink: false                 # ragionamento esteso del Critic (solo modelli con capability "thinking"):
                                    # false lo disattiva esplicitamente -> chiamate molto più rapide su CPU
 ollamaHost: "http://localhost:11434"
