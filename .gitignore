@@ -7,3 +7,6 @@ output/
 .cache/
 .pytest_cache/
 .DS_Store
+*.log
+schema-rule.json
+.env
