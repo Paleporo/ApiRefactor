@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -16,6 +16,9 @@ from app.runtime import Deadline
 
 log = get_logger("llm")
 T = TypeVar("T", bound=BaseModel)
+
+# proprietà discriminatore delle union pydantic (Literal con default -> "const" non in required)
+DISCRIMINATORS = ("kind", "type")
 
 _THINK = re.compile(r"<think>.*?</think>", re.DOTALL)
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.MULTILINE)
@@ -30,6 +33,35 @@ def extract_json(text: str) -> str:
     return text[start : end + 1] if start != -1 and end > start else text
 
 
+def llm_json_schema(response_model: type[BaseModel]) -> dict[str, Any]:
+    """JSON Schema da inviare al modello, con i discriminatori obbligatori e in testa.
+
+    Pydantic genera `kind`/`type` con un default, quindi fuori da `required`. La grammatica di Ollama emette
+    prima i campi obbligatori: un modello che parte da "kind" potrebbe scegliere solo le varianti senza campi
+    obbligatori (es. tutte le regole -> requireOperationId, tutte le operazioni -> ADD_OPERATION_ID).
+    """
+    schema = response_model.model_json_schema(by_alias=True)
+    _require_discriminators(schema)
+    return schema
+
+
+def _require_discriminators(node: Any) -> None:
+    if isinstance(node, dict):
+        props = node.get("properties")
+        if isinstance(props, dict):
+            for name in DISCRIMINATORS:
+                prop = props.get(name)
+                if isinstance(prop, dict) and "const" in prop:
+                    node["required"] = [name, *(r for r in node.get("required", []) if r != name)]
+                    node["properties"] = {name: prop, **{k: v for k, v in props.items() if k != name}}
+                    break
+        for value in node.values():
+            _require_discriminators(value)
+    elif isinstance(node, list):
+        for value in node:
+            _require_discriminators(value)
+
+
 class StructuredLlm:
     def __init__(self, provider: LlmProvider, call_timeout: float, technical_retries: int, deadline: Deadline | None = None):
         self.provider = provider
@@ -39,7 +71,7 @@ class StructuredLlm:
         self.calls = 0
 
     async def generate(self, request: LlmRequest, response_model: type[T]) -> T:
-        schema = response_model.model_json_schema(by_alias=True)
+        schema = llm_json_schema(response_model)
         attempts = self.technical_retries + 1
         last_error = ""
         current = request
@@ -50,7 +82,7 @@ class StructuredLlm:
                 timeout = max(1.0, min(timeout, self.deadline.remaining))
             model = self.provider.model_for(request.role)
             log.debug(
-                "[LLM] → %s/%s (model=%s, tentativo %d/%d, ~%d token)\n--- system ---\n%s\n--- user ---\n%s",
+                "[LLM] -> %s/%s (model=%s, tentativo %d/%d, ~%d token)\n--- system ---\n%s\n--- user ---\n%s",
                 request.role.value, request.task, model, attempt, attempts,
                 (len(current.system) + len(current.user)) // 4, current.system, current.user,
             )
@@ -65,7 +97,7 @@ class StructuredLlm:
                 last_error = str(exc)
                 log.warning("[LLM] %s: %s (tentativo %d/%d)", request.task, last_error, attempt, attempts)
                 continue
-            log.debug("[LLM] ← %s/%s risposta:\n%s", request.role.value, request.task, raw)
+            log.debug("[LLM] <- %s/%s risposta:\n%s", request.role.value, request.task, raw)
             try:
                 return response_model.model_validate_json(extract_json(raw))
             except (ValidationError, json.JSONDecodeError, ValueError) as exc:

@@ -42,3 +42,25 @@ async def test_ollama_upgrades_swagger2(ollama_config, rules_dir):
         APIS / "case-001-swagger2-legacy.yaml")
     assert result.final.data["openapi"].startswith("3.0")
     assert result.status != RunStatus.FAILED
+
+
+async def test_ollama_compiles_security_and_naming_rules_into_the_right_requirements(ollama_config, rules_dir,
+                                                                                    tmp_path):
+    """Regressione: senza discriminatori obbligatori ogni regola collassava su requireOperationId."""
+    from app.llm.structured import StructuredLlm
+    from app.rules.interpreter import RuleInterpreter
+    from app.rules.loader import parse_markdown_rules
+
+    llm = StructuredLlm(OllamaProvider(ollama_config), ollama_config.llm_call_timeout_seconds,
+                        ollama_config.llm_technical_retries)
+    interpreter = RuleInterpreter(llm, tmp_path / "cache")
+    sources = {r.id: r for f in ("security.md", "general.md") for r in parse_markdown_rules(rules_dir / f)}
+
+    sec = await interpreter.compile_rule(sources["SEC-001"])
+    assert [r.kind for r in sec.requirements] == ["requireSecurity"]
+    assert sec.requirements[0].scheme_type == "http"
+
+    naming = await interpreter.compile_rule(sources["NAMING-001"])
+    assert [r.kind for r in naming.requirements] == ["nameCasing", "nameCasing"]
+    assert {(r.target.value, r.casing.value) for r in naming.requirements} == {
+        ("schemaName", "pascal"), ("propertyName", "camel")}

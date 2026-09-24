@@ -22,12 +22,14 @@ class FakeLlmProvider(LlmProvider):
     def __init__(self, handler: Handler):
         self.handler = handler
         self.requests: list[LlmRequest] = []
+        self.schemas: list[dict[str, Any]] = []  # JSON Schema ricevuti, come li riceverebbe Ollama
 
     def model_for(self, role: AgentRole) -> str:
         return f"fake-{role.value}"
 
     async def complete(self, request: LlmRequest, json_schema: dict[str, Any], timeout: float) -> str:
         self.requests.append(request)
+        self.schemas.append(json_schema)
         result = self.handler(request)
         if isinstance(result, Exception):
             if isinstance(result, LlmCallError):

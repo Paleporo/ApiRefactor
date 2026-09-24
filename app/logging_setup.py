@@ -7,6 +7,12 @@ PHASE_LOGGER = "app"
 
 
 def configure_logging(level: str = "INFO") -> None:
+    # console Windows (cp1252): un carattere non rappresentabile (es. nelle risposte LLM in DEBUG)
+    # viene sostituito invece di far fallire il logging
+    try:
+        sys.stdout.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass  # stream già sostituito (es. cattura dei test) o non riconfigurabile
     root = logging.getLogger(PHASE_LOGGER)
     root.handlers.clear()
     handler = logging.StreamHandler(sys.stdout)

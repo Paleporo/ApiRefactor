@@ -193,7 +193,7 @@ class RefactorPipeline:
 
             # ── feedback loop ──────────────────────────────────────────
             for iteration in range(1, self.config.max_iterations + 1):
-                log.info("──── Iterazione %d/%d ────", iteration, self.config.max_iterations)
+                log.info("---- Iterazione %d/%d ----", iteration, self.config.max_iterations)
                 deadline.check("VALIDATE")
                 validation = oas.validate(candidate) + (conversion_issues if iteration == 1 else [])
                 log.info("[VALIDATE] OpenAPI: %s", summary(validation))
