@@ -7,8 +7,10 @@ Guidelines:
   (e.g. "schemas PascalCase, properties camelCase" -> two nameCasing entries).
   Choose for each entry the `kind` that expresses the constraint EXACTLY:
   - requireHeader: an operation must declare a request header (e.g. Idempotency-Key). Use `condition.methods` to restrict to methods.
-  - requireQueryParameter: an operation must declare a query parameter with the given `name`; `required` says whether it
-    must be mandatory (true) or optional (false). Use `condition.methods` (e.g. ["get"]) to restrict to methods.
+  - requireQueryParameter: an operation must declare a query parameter with the given `name`.
+    `required: true` only if the rule says the parameter must be MANDATORY; otherwise `required: false`, which means
+    "must exist" (whether the API declares it mandatory or optional is not checked).
+    Use `condition.methods` (e.g. ["get"]) to restrict to methods.
   - requireOperationId: every operation must have an operationId (unique=true if uniqueness is required).
   - nameCasing: a naming convention. target = schemaName | propertyName | queryParameter | pathSegment | header | operationId;
     casing = pascal | camel | kebab | snake | macro (UPPER_SNAKE_CASE) | train (Train-Case).

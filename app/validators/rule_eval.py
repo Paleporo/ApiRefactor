@@ -68,17 +68,21 @@ class RuleEvaluator:
                                       fix=f"ADD_HEADER {req.header} required=true", operation_id=op.operation_id)
 
     def _eval_requireQueryParameter(self, rule: CompiledRule, req: RequireQueryParameter) -> Iterator[Violation]:
-        """Il parametro deve esistere (path-level o operation-level) con esattamente la requiredness indicata."""
-        wanted = "obbligatorio" if req.required else "opzionale"
+        """Il parametro deve esistere (operation-level, path-level o via $ref).
+
+        required=true: deve anche essere obbligatorio. required=false: basta che esista, l'obbligatorietà
+        dichiarata dall'API non si tocca (preserve behavior), come per requireHeader.
+        """
         for op in self._operations(rule):
             found = [p for p in self._parameters(op) if p.get("in") == "query" and p.get("name") == req.name]
             if not found:
+                wanted = "obbligatorio" if req.required else "opzionale"
                 yield self._violation(rule, op.pointer, f"{op.label}: manca il query parameter {wanted} '{req.name}'",
                                       expected={"name": req.name, "required": req.required}, actual=None,
                                       fix=f"ADD_QUERY_PARAMETER {req.name} (required={str(req.required).lower()})",
                                       operation_id=op.operation_id)
-            elif bool(found[-1].get("required")) != req.required:  # l'ultimo è quello a livello operation
-                yield self._violation(rule, op.pointer, f"{op.label}: il query parameter '{req.name}' deve essere {wanted}",
+            elif req.required and not found[-1].get("required"):  # l'ultimo è quello a livello operation
+                yield self._violation(rule, op.pointer, f"{op.label}: il query parameter '{req.name}' deve essere obbligatorio",
                                       expected={"name": req.name, "required": req.required},
                                       actual={"required": bool(found[-1].get("required"))},
                                       fix=f"ADD_QUERY_PARAMETER {req.name} required={str(req.required).lower()}",

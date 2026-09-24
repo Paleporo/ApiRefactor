@@ -72,7 +72,8 @@ class RequireHeader(_Base):
 class RequireQueryParameter(_Base):
     kind: Literal["requireQueryParameter"] = "requireQueryParameter"
     name: str = Field(description="Nome esatto del query parameter (case-sensitive)")
-    required: bool = Field(description="true: deve essere dichiarato required; false: deve esistere ed essere opzionale")
+    required: bool = Field(description="true: deve esistere ed essere dichiarato required; "
+                                       "false: deve solo esistere, la sua obbligatorietà non viene verificata")
 
 
 class RequireOperationId(_Base):

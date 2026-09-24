@@ -241,12 +241,17 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   sbagliate. Per esempio "le GET che restituiscono collezioni devono accettare `limit`" resta `judgment`,
   perché "restituisce una collezione" non si può esprimere con `condition`. Le regole `judgment` restano
   affidate al Critic.
-- **`requireQueryParameter`** (`name`, `required`, più `condition.methods`, per esempio `["get"]`): il
-  parametro deve esistere, dichiarato a livello di operation, di path o via `$ref`, con esattamente la
-  requiredness indicata. La correzione corrispondente è l'operazione `ADD_QUERY_PARAMETER`. Aggiungere un
-  parametro opzionale è GOVERNANCE e non-breaking; renderlo obbligatorio è SEMANTIC e breaking. Se il
-  parametro è definito a livello di path o via `$ref` con una requiredness diversa, l'operazione fallisce in
-  modo esplicito invece di creare un duplicato sulla singola operation.
+- **`requireQueryParameter`** (`name`, `required`, più `condition.methods`, per esempio `["get"]`): con
+  `required: false` il parametro deve solo **esistere**, dichiarato a livello di operation, di path o via `$ref`.
+  La sua obbligatorietà non viene verificata né modificata: una regola di paginazione non deve rendere
+  opzionale un `limit` che l'API dichiara obbligatorio (preserve behavior). Con `required: true` deve anche
+  essere obbligatorio. È lo stesso comportamento di `requireHeader`. La correzione corrispondente è
+  l'operazione `ADD_QUERY_PARAMETER`:
+  - con `required: false` aggiunge il parametro come opzionale solo se manca (GOVERNANCE, non-breaking) e
+    non tocca mai un parametro esistente;
+  - con `required: true` lo aggiunge obbligatorio o rende obbligatorio quello esistente (SEMANTIC,
+    breaking). Se il parametro è definito a livello di path o via `$ref` come opzionale, l'operazione
+    fallisce in modo esplicito invece di creare un duplicato sulla singola operation.
 - **Cache delle regole compilate** in `.cache/compiled-rules/` (configurabile), una per file `.md`. La
   cache è invalidata dallo SHA-256 del file, dal modello usato e dalla versione del DSL: se un file cambia,
   viene ricompilato per intero. Le compilazioni fallite non vengono salvate, quindi alla run successiva si

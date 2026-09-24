@@ -37,7 +37,8 @@ class AddQueryParameter(_Op):
     type: Literal["ADD_QUERY_PARAMETER"] = "ADD_QUERY_PARAMETER"
     target: str = Field(description="JSON pointer dell'operation, es. /paths/~1payments/get")
     name: str
-    required: bool = False
+    required: bool = Field(False, description="false: aggiunge il parametro opzionale solo se manca, non modifica "
+                                              "mai un parametro esistente; true: lo aggiunge o lo rende obbligatorio")
     schema_: dict[str, Any] = Field(default_factory=lambda: {"type": "string"}, alias="schema")
     description: str | None = None
 
