@@ -241,6 +241,15 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   sbagliate. Per esempio "le GET che restituiscono collezioni devono accettare `limit`" resta `judgment`,
   perché "restituisce una collezione" non si può esprimere con `condition`. Le regole `judgment` restano
   affidate al Critic.
+- **Metodi HTTP nominati nel testo della regola.** Se il testo nomina GET, POST, PUT, PATCH o DELETE (anche
+  in minuscolo), `condition.methods` deve contenere esattamente quei metodi. Se è null, ne manca uno o ce n'è
+  uno in più, la regola meccanica varrebbe per metodi che il testo non prevede. È un bug osservato con
+  Ollama reale: "Ogni endpoint POST …" compilata senza `methods` aggiungeva `Idempotency-Key` obbligatorio
+  alle GET, una modifica "expected" perché motivata da un ruleId, che né il diff né il Critic potevano
+  bloccare. Una compilazione non conforme viene ritentata, passando l'errore al modello; esauriti i retry, la
+  regola resta attiva solo come `judgment` marcata `compileFailed`, con un avviso nel governance report. Lo
+  stesso controllo si applica alle regole lette dalla cache: se una non è conforme, il file viene
+  ricompilato. Le regole solo-giudizio non vengono controllate, perché non si applicano meccanicamente.
 - **`requireQueryParameter`** (`name`, `required`, più `condition.methods`, per esempio `["get"]`): con
   `required: false` il parametro deve solo **esistere**, dichiarato a livello di operation, di path o via `$ref`.
   La sua obbligatorietà non viene verificata né modificata: una regola di paginazione non deve rendere

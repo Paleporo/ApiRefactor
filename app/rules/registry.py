@@ -209,6 +209,12 @@ async def build_registry(rules_dir: Path, interpreter) -> tuple[RuleRegistry, ob
         info.warnings.append(f"Nessun file .md in '{rules_dir}': nessuna regola in linguaggio naturale.")
         log.warning("[RULES] %s", info.warnings[-1])
 
+    for rule_id in report.failed_rules:
+        msg = (f"Regola {rule_id} non compilata in modo conforme: attiva SOLO come regola di giudizio "
+               f"(compileFailed), nessun controllo meccanico. Motivo: {report.failure_reasons.get(rule_id, '?')}")
+        info.warnings.append(msg)
+        log.warning("[RULES] %s", msg)
+
     registry = RuleRegistry(compiled, spectral, info)
     log.info("[RULES] %d regole Spectral, %d regole compilate da linguaggio naturale (%d solo-giudizio), %d conflitti",
              len(spectral), len(compiled), len(registry.judgment_rules()), len(registry.conflicts))

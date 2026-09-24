@@ -4,6 +4,8 @@ Richiede `ollama serve` attivo e i modelli di config.yaml scaricati; altrimenti 
 Sono lenti su CPU (minuti): per questo sono esclusi dalla suite di default.
 """
 
+import json
+
 import pytest
 
 from app.config import load_config
@@ -35,6 +37,14 @@ async def test_ollama_compiles_rules_and_refactors_case_003(ollama_config, rules
     assert not [v for v in result.final_validation if v.severity == "ERROR"]
     assert all(c.expected for c in result.final_diff if c.breaking)
     assert all(r.requirements for r in result.registry.compiled)
+    # regressione: la regola POST era compilata senza methods e aggiungeva Idempotency-Key alle GET
+    idempotency = result.registry.get("HTTP-IDEMPOTENCY-001")
+    assert not idempotency.compile_failed and idempotency.condition.methods == ["post"]
+    assert not [c for c in result.applied if c.rule_id == "HTTP-IDEMPOTENCY-001"]
+    for item in result.final.data["paths"].values():
+        for op in item.values():
+            assert not any(p.get("name") == "Idempotency-Key" for p in op.get("parameters", []))
+    assert not [c for c in result.final_diff if "Idempotency-Key" in json.dumps(c.dump())]
 
 
 async def test_ollama_upgrades_swagger2(ollama_config, rules_dir):

@@ -23,6 +23,9 @@ Guidelines:
   a close-but-wrong requirement is checked mechanically and produces wrong violations and wrong fixes.
   This includes conditions the `condition` fields cannot express: e.g. "GET operations that return collections must
   accept `limit`" -> judgment, because "returns a collection" is not expressible with methods/statusPattern/pathPattern.
+- If the rule text names one or more HTTP methods (GET, POST, PUT, PATCH, DELETE), ALWAYS set `condition.methods`
+  to exactly those methods (e.g. "every POST endpoint ..." -> "methods": ["post"]). Leaving it null applies the rule
+  to every method. This is checked mechanically: a compilation that ignores the named methods is rejected.
 - `scope` is the element the rule is about: document, path, operation, parameter, response, schema, property.
 - `severity`: MUST/deve -> ERROR, SHOULD/dovrebbe -> WARNING, MAY/può -> INFO.
 - Never invent requirements that the rule does not state.

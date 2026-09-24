@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 from app.errors import LlmCallError
@@ -12,9 +13,39 @@ from app.llm.structured import StructuredLlm
 from app.logging_setup import get_logger
 from app.prompts import load_prompt
 from app.rules.loader import parse_markdown_rules
-from app.rules.models import DSL_VERSION, CompiledRule, CompiledRuleDraft, JudgmentRequirement, RuleScope, RuleSource
+from app.rules.models import (DSL_VERSION, CompiledRule, CompiledRuleDraft, JudgmentRequirement, RuleCondition,
+                              RuleScope, RuleSource)
 
 log = get_logger("rules")
+
+
+HTTP_METHOD_WORDS = re.compile(r"\b(GET|POST|PUT|PATCH|DELETE)\b", re.IGNORECASE)
+
+
+def methods_named_in(text: str) -> list[str]:
+    """Metodi HTTP nominati nel testo della regola (anche minuscoli), in minuscolo e senza ripetizioni."""
+    return list(dict.fromkeys(m.lower() for m in HTTP_METHOD_WORDS.findall(text)))
+
+
+def check_method_scope(text: str, condition: RuleCondition, requirements: list) -> None:
+    """Una regola meccanica non deve mai essere più ampia del testo sui metodi HTTP.
+
+    Se il testo nomina dei metodi, `condition.methods` deve contenere esattamente quei metodi: null o un
+    sottoinsieme la applicherebbero a metodi non previsti (es. Idempotency-Key obbligatorio sulle GET),
+    un metodo in più la allargherebbe. Le regole solo-giudizio non vengono applicate meccanicamente: non si
+    controllano. Solleva ValueError con un messaggio destinato al modello.
+    """
+    named = methods_named_in(text)
+    if not named or all(getattr(r, "kind", None) == "judgment" for r in requirements):
+        return
+    declared = [m.lower() for m in condition.methods] if condition.methods else None
+    if declared is None:
+        raise ValueError(f"the rule text names the HTTP method(s) {named} but condition.methods is null: set "
+                         f"condition.methods to {named} (otherwise the rule would apply to every method)")
+    if set(declared) != set(named):
+        raise ValueError(f"the rule text names the HTTP method(s) {named} but condition.methods is {declared}: "
+                         f"it must be exactly {named}. If the text restricts methods in a way this cannot express "
+                         "(e.g. 'all methods except GET'), use a judgment requirement instead")
 
 
 class CompileReport:
@@ -22,6 +53,7 @@ class CompileReport:
         self.cache_hits: list[str] = []
         self.compiled_files: list[str] = []
         self.failed_rules: list[str] = []
+        self.failure_reasons: dict[str, str] = {}
 
 
 def _hash(file: Path) -> str:
@@ -50,7 +82,14 @@ class RuleInterpreter:
         if payload.get("sha256") != digest or payload.get("dslVersion") != DSL_VERSION or payload.get("model") != model:
             log.info("[RULES] %s modificato (hash/modello/DSL diverso): ricompilo", source.name)
             return None
-        return [CompiledRule.model_validate(r) for r in payload.get("rules", [])]
+        rules = [CompiledRule.model_validate(r) for r in payload.get("rules", [])]
+        for rule in rules:  # cache scritta prima del controllo sui metodi: non si riusa una regola troppo ampia
+            try:
+                check_method_scope(rule.text, rule.condition, rule.requirements)
+            except ValueError as exc:
+                log.warning("[RULES] %s: la regola in cache %s non è conforme (%s): ricompilo", source.name, rule.id, exc)
+                return None
+        return rules
 
     def _write_cache(self, source: Path, digest: str, model: str, rules: list[CompiledRule]) -> None:
         self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -76,10 +115,14 @@ class RuleInterpreter:
             ),
             context={"ruleId": source.id, "text": source.text, "file": source.file},
         )
-        draft = await self.llm.generate(request, CompiledRuleDraft)
+        draft = await self.llm.generate(
+            request, CompiledRuleDraft, check=lambda d: check_method_scope(source.text, d.condition, d.requirements))
+        condition = draft.condition
+        if condition.methods:
+            condition = condition.model_copy(update={"methods": list(dict.fromkeys(m.lower() for m in condition.methods))})
         return CompiledRule(
             id=source.id, text=source.text, file=source.file, line=source.line,
-            scope=draft.scope, condition=draft.condition, requirements=draft.requirements, severity=draft.severity,
+            scope=draft.scope, condition=condition, requirements=draft.requirements, severity=draft.severity,
         )
 
     async def compile_file(self, source: Path, report: CompileReport) -> list[CompiledRule]:
@@ -102,6 +145,7 @@ class RuleInterpreter:
                 # la regola non viene persa: resta come regola di giudizio per il Critic, marcata come fallita
                 any_failed = True
                 report.failed_rules.append(rule.id)
+                report.failure_reasons[rule.id] = str(exc)
                 log.warning("[RULES] compilazione di %s fallita (%s): resta solo come regola di giudizio", rule.id, exc)
                 compiled.append(
                     CompiledRule(

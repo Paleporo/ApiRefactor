@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -70,7 +70,10 @@ class StructuredLlm:
         self.deadline = deadline
         self.calls = 0
 
-    async def generate(self, request: LlmRequest, response_model: type[T]) -> T:
+    async def generate(self, request: LlmRequest, response_model: type[T],
+                       check: Callable[[T], None] | None = None) -> T:
+        """`check` (opzionale) verifica vincoli deterministici oltre allo schema: se solleva ValueError il
+        tentativo conta come non conforme e il messaggio torna al modello, come per gli errori di schema."""
         schema = llm_json_schema(response_model)
         attempts = self.technical_retries + 1
         last_error = ""
@@ -99,7 +102,7 @@ class StructuredLlm:
                 continue
             log.debug("[LLM] <- %s/%s risposta:\n%s", request.role.value, request.task, raw)
             try:
-                return response_model.model_validate_json(extract_json(raw))
+                result = response_model.model_validate_json(extract_json(raw))
             except (ValidationError, json.JSONDecodeError, ValueError) as exc:
                 last_error = f"output non conforme allo schema: {str(exc)[:800]}"
                 log.warning("[LLM] %s: output non valido (tentativo %d/%d)", request.task, attempt, attempts)
@@ -110,6 +113,23 @@ class StructuredLlm:
                         + "\n\nLa risposta precedente non rispettava lo schema JSON richiesto. Errore:\n"
                         + last_error
                         + "\nRispondi SOLO con un oggetto JSON valido secondo lo schema."
+                    }
+                )
+                continue
+            if check is None:
+                return result
+            try:
+                check(result)
+                return result
+            except ValueError as exc:
+                last_error = f"output non conforme ai vincoli: {exc}"
+                log.warning("[LLM] %s: %s (tentativo %d/%d)", request.task, last_error, attempt, attempts)
+                current = request.model_copy(
+                    update={
+                        "user": request.user
+                        + "\n\nLa risposta precedente era JSON valido ma violava un vincolo obbligatorio:\n"
+                        + str(exc)
+                        + "\nCorreggi la risposta rispettando il vincolo. Rispondi SOLO con un oggetto JSON valido."
                     }
                 )
         raise LlmCallError(f"Chiamata LLM '{request.task}' fallita dopo {attempts} tentativi: {last_error}")
