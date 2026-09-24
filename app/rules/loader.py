@@ -28,7 +28,11 @@ def natural_language_rule_files(rules_dir: Path) -> list[Path]:
 
 
 def parse_markdown_rules(file: Path) -> list[RuleSource]:
-    """Ogni voce di elenco di primo livello è una regola; le righe indentate successive la continuano.
+    """Ogni voce di elenco di primo livello è una regola.
+
+    Continuazioni (come in CommonMark): le righe indentate che seguono la voce, anche dopo una riga vuota,
+    e le righe NON indentate che la seguono direttamente, senza riga vuota in mezzo ("lazy continuation").
+    Un paragrafo non indentato dopo una riga vuota chiude l'elenco ed è solo testo di contesto.
 
     ID: esplicito con `[ID]` o `**ID**:` in testa alla voce, altrimenti `<NOMEFILE>-<NNN>` stabile per posizione.
     """
@@ -36,6 +40,7 @@ def parse_markdown_rules(file: Path) -> list[RuleSource]:
     rules: list[RuleSource] = []
     section: str | None = None
     current: dict | None = None
+    prev_blank = False
 
     def flush() -> None:
         if current:
@@ -44,6 +49,8 @@ def parse_markdown_rules(file: Path) -> list[RuleSource]:
             rules.append(RuleSource(id=rid, text=text, file=str(file), line=current["line"], section=section))
 
     for lineno, raw in enumerate(file.read_text(encoding="utf-8").splitlines(), start=1):
+        blank = not raw.strip()
+        after_blank, prev_blank = prev_blank, blank
         if heading := _HEADING.match(raw.strip()):
             flush()
             current = None
@@ -59,9 +66,9 @@ def parse_markdown_rules(file: Path) -> list[RuleSource]:
                 rid = explicit.group("a") or explicit.group("b")
                 body = body[explicit.end():]
             current = {"id": rid, "lines": [body], "line": lineno}
-        elif current and raw.strip() and raw.startswith((" ", "\t")):
+        elif current and not blank and (raw.startswith((" ", "\t")) or not after_blank):
             current["lines"].append(raw.strip())
-        elif not raw.strip():
+        elif blank:
             continue
         else:
             flush()

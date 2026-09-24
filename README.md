@@ -363,8 +363,10 @@ rules-input/spectral/                                     materiale fornito, con
 ```
 
 **Formato dei file `.md`.** Vengono letti solo i file `.md` direttamente dentro `rules/` (le sottocartelle
-contengono documentazione). Ogni voce di elenco di primo livello è una regola; le righe indentate che la
-seguono la continuano. L'ID si indica con `[ID]` oppure `**ID**:` all'inizio della voce. Senza ID esplicito
+contengono documentazione). Ogni voce di elenco di primo livello è una regola. Come nel Markdown standard
+(CommonMark), la voce continua sulle righe indentate che la seguono, anche dopo una riga vuota, e sulle righe
+non indentate che la seguono direttamente, senza riga vuota in mezzo. Un paragrafo non indentato dopo una
+riga vuota chiude l'elenco ed è solo testo di contesto: non viene inviato all'LLM. L'ID si indica con `[ID]` oppure `**ID**:` all'inizio della voce. Senza ID esplicito
 viene assegnato `<NOMEFILE>-<NNN>`, che però cambia se si riordinano le voci: meglio sempre un ID esplicito.
 I titoli (`#`) fanno da sezione e vengono passati all'LLM come contesto.
 

@@ -117,3 +117,41 @@ async def test_cache_from_older_dsl_version_is_recompiled(tmp_path, rules_dir):
     before = len(calls)
     await build_registry(rules_dir, interpreter(tmp_path, calls))
     assert len(calls) == before * 2  # DSL cambiato: tutte le regole ricompilate, nessuna letta dalla cache vecchia
+
+
+def test_markdown_lazy_continuation_and_paragraph_boundaries(tmp_path):
+    md = tmp_path / "paging.md"
+    md.write_text(
+        "# Paging\n\n"
+        "- [P-001] Prima riga\n"
+        "continuazione non indentata subito dopo la voce.\n"        # lazy continuation (CommonMark)
+        "  continuazione indentata.\n"
+        "\n"
+        "  continuazione indentata dopo una riga vuota.\n"          # resta nella voce
+        "- [P-002] Seconda regola.\n"
+        "\n"
+        "Paragrafo di contesto dopo una riga vuota: non è una regola.\n"
+        "  Né questa riga, che segue il paragrafo.\n"
+        "- [P-003] Terza regola.\n"
+        "## Altra sezione\n"
+        "testo sotto il titolo, senza voce: ignorato.\n")
+    rules = {r.id: r for r in parse_markdown_rules(md)}
+    assert rules["P-001"].text == ("Prima riga continuazione non indentata subito dopo la voce. "
+                                   "continuazione indentata. continuazione indentata dopo una riga vuota.")
+    assert rules["P-002"].text == "Seconda regola."
+    assert rules["P-003"].text == "Terza regola."
+    assert list(rules) == ["P-001", "P-002", "P-003"]
+
+
+def test_project_rule_files_parse_to_complete_non_duplicated_texts():
+    import re
+
+    from tests.conftest import ROOT
+
+    rules = {r.id: r for f in sorted((ROOT / "rules").glob("*.md")) for r in parse_markdown_rules(f)}
+    for rule in rules.values():
+        sentences = [s.strip() for s in re.split(r"[.;:]\s+", rule.text) if s.strip()]
+        assert len(sentences) == len(set(sentences)), f"{rule.id}: testo duplicato: {rule.text}"
+    for rid in ("PAGINATION-001", "NAMING-DOMAIN-001"):
+        assert rules[rid].text.count("Regola di giudizio") == 1, rules[rid].text
+    assert rules["PAGINATION-001"].text.endswith("non riguarda gli status code.")

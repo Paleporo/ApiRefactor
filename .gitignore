@@ -5,7 +5,6 @@ __pycache__/
 node_modules/
 output/
 .cache/
-.pytest_cache/
 .DS_Store
 *.log
 schema-rule.json
