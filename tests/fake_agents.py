@@ -32,7 +32,8 @@ BEARER = {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}
 
 RULE_DRAFTS: dict[str, dict[str, Any]] = {
     "HTTP-IDEMPOTENCY-001": {"scope": "operation", "condition": {"methods": ["post"]},
-                             "requirements": [{"kind": "requireHeader", "header": "Idempotency-Key", "required": True}],
+                             # "supportare" = accettare, non pretendere: header opzionale
+                             "requirements": [{"kind": "requireHeader", "header": "Idempotency-Key", "required": False}],
                              "severity": "ERROR"},
     "ERR-001": {"scope": "response", "condition": {"statusPattern": "^[45]\\d\\d$"},
                 "requirements": [{"kind": "errorFormat", "mediaType": "application/problem+json",
@@ -71,8 +72,9 @@ def scripted_fixes(problems: list[dict[str, Any]]) -> list[dict[str, Any]]:
         path = p.get("path") if "path" in p else p.get("location", "")
         tokens = jp.split(path)
         if rid == "HTTP-IDEMPOTENCY-001":
-            ops.append({"type": "ADD_HEADER", "target": path, "header": "Idempotency-Key", "required": True,
-                        "ruleId": rid})
+            expected = p.get("expected") or (p.get("details") or {}).get("expected") or {}
+            ops.append({"type": "ADD_HEADER", "target": path, "header": "Idempotency-Key",
+                        "required": bool(expected.get("required")), "ruleId": rid})
         elif rid == "SEC-001":
             ops += [{"type": "ADD_SECURITY_SCHEME", "name": "bearerAuth", "scheme": BEARER, "ruleId": rid},
                     {"type": "SET_SECURITY_REQUIREMENT", "target": path, "requirements": [{"bearerAuth": []}],

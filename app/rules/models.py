@@ -14,7 +14,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.model.issues import Severity
 
-DSL_VERSION = "2"
+# 3: requireHeader.required senza default. Le regole in cache compilate con il vecchio default (true)
+# non si distinguono da quelle in cui il modello ha scelto true: vanno ricompilate tutte.
+DSL_VERSION = "3"
 
 
 class RuleScope(StrEnum):
@@ -66,7 +68,8 @@ class RuleCondition(_Base):
 class RequireHeader(_Base):
     kind: Literal["requireHeader"] = "requireHeader"
     header: str
-    required: bool = True
+    required: bool = Field(description="true: deve esistere ed essere dichiarato required; "
+                                       "false: deve solo esistere, la sua obbligatorietà non viene verificata")
 
 
 class RequireQueryParameter(_Base):

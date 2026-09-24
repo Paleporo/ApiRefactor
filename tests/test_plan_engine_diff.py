@@ -88,7 +88,8 @@ def test_engine_reports_missing_target_explicitly_and_keeps_going():
 def test_engine_rename_schema_updates_refs_and_classifies_changes():
     new, applied, failures = RefactoringEngine().apply(doc(), planned(
         {"type": "RENAME_SCHEMA", "from": "order", "to": "PurchaseOrder", "ruleId": "R"},
-        {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "ruleId": "R"},
+        {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "required": True,
+         "ruleId": "R"},
         {"type": "SET_FIELD", "target": "/info/description", "value": "desc", "ruleId": "R"},
     ))
     assert not failures
@@ -114,7 +115,8 @@ def test_breaking_classification_table():
 def test_diff_flags_untraced_changes_as_unexpected():
     before = doc()
     after, applied, _ = RefactoringEngine().apply(before, planned(
-        {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "ruleId": "R-1"}))
+        {"type": "ADD_HEADER", "target": "/paths/~1orders/post", "header": "Idempotency-Key", "required": True,
+         "ruleId": "R-1"}))
     del after.data["paths"]["/orders"]["post"]["responses"]["404"]  # regressione non pianificata
     after.data["components"]["schemas"]["order"]["properties"]["status"]["enum"] = ["A"]
     changes = {c.type: c for c in compute_diff(before, after, applied)}

@@ -11,7 +11,8 @@ from app.config import load_config
 from app.errors import EmptySpecError, PipelineError
 from app.logging_setup import configure_logging, get_logger
 
-EXIT_CODES = {"SUCCESS": 0, "NEEDS_REVIEW": 1, "FAILED": 2}
+# 3 = errore di input/configurazione (PipelineError); 4 = successo con modifiche breaking da comunicare ai client
+EXIT_CODES = {"SUCCESS": 0, "NEEDS_REVIEW": 1, "FAILED": 2, "SUCCESS_WITH_BREAKING_CHANGES": 4}
 log = get_logger("cli")
 
 
@@ -97,6 +98,11 @@ async def _refactor(config, args) -> int:
     print()
     print(f"Stato finale: {outcome.status}  (iterazioni: {outcome.iterations}, chiamate LLM: {result.llm_calls}, "
           f"{result.elapsed_seconds:.1f}s)")
+    if result.breaking_changes:
+        print(f"  ATTENZIONE: {len(result.breaking_changes)} modifiche BREAKING nell'output "
+              "(i client esistenti vanno aggiornati):")
+        for b in result.breaking_changes:
+            print(f"    * {b['type']} @ {b['location']} (ruleId {b['ruleId']})")
     for reason in outcome.reasons:
         print(f"  - {reason}")
     print(f"Output: {outcome.output_dir}")

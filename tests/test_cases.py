@@ -35,7 +35,10 @@ async def test_case_001_swagger2_upgrade(config, agents, rules_dir, tmp_path):
     source_text = (APIS / "case-001-swagger2-legacy.yaml").read_text()
     result, out = await run_case(config, agents, rules_dir, "case-001-swagger2-legacy.yaml", tmp_path)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # il passaggio della security da apiKey a bearer JWT (SEC-001) cambia chi può accedere: breaking, atteso
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
+    assert {b["type"] for b in result.breaking_changes} == {"SECURITY_REQUIREMENT_CHANGED"}
+    assert all(b["ruleId"] == "SEC-001" for b in result.breaking_changes)
     final = result.final.data
     assert final["openapi"].startswith("3.0")
     # nessun endpoint perso
@@ -59,7 +62,12 @@ async def test_case_001_swagger2_upgrade(config, agents, rules_dir, tmp_path):
 async def test_case_002_naming(config, agents, rules_dir, tmp_path):
     result, out = await run_case(config, agents, rules_dir, "case-002-naming.yaml", tmp_path)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # rinominare proprietà cambia il wire: breaking, atteso, in evidenza nello stato e in summary.json
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
+    summary = json.loads((out / "reports" / "summary.json").read_text())
+    assert summary["status"] == "SUCCESS_WITH_BREAKING_CHANGES" and list(summary)[:2] == ["status", "breakingChanges"]
+    assert {(b["type"], b["location"].rsplit("/", 1)[-1]) for b in summary["breakingChanges"]} >= {
+        ("PROPERTY_REMOVED", "amount_value"), ("PROPERTY_ADDED", "amountValue")}
     schemas = result.final.data["components"]["schemas"]
     assert "PaymentOrder" in schemas and "payment_order" not in schemas
     props = schemas["PaymentOrder"]["properties"]
@@ -83,7 +91,9 @@ async def test_case_002_naming(config, agents, rules_dir, tmp_path):
 async def test_case_003_problem_details(config, agents, rules_dir, tmp_path):
     result, out = await run_case(config, agents, rules_dir, "case-003-no-problem-details.yaml", tmp_path)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # le response di errore cambiano media type: breaking, atteso
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
+    assert {b["type"] for b in result.breaking_changes} == {"MEDIA_TYPE_REMOVED"}
     data = result.final.data
     for ptr in ("/paths/~1accounts/get/responses/400", "/paths/~1accounts~1{account-id}/get/responses/404"):
         content = jp.resolve(data, ptr)["content"]
@@ -107,7 +117,8 @@ async def test_case_004_security(config, agents, rules_dir, tmp_path):
     # la baseline non è nemmeno valida (security verso uno schema non definito)
     first_plan_rules = {p.operation.rule_id for p in result.plans[0].operations}
     assert "OAS-SECURITY-UNDEFINED" in first_plan_rules or "SEC-001" in first_plan_rules
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # proteggere un'operation prima pubblica è una restrizione: breaking, atteso
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
     data = result.final.data
     assert data["components"]["securitySchemes"]["bearerAuth"] == {
         "type": "http", "scheme": "bearer", "bearerFormat": "JWT"}

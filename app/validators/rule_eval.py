@@ -63,10 +63,12 @@ class RuleEvaluator:
             if not found:
                 yield self._violation(rule, op.pointer, f"{op.label}: manca l'header {req.header}",
                                       expected={"header": req.header, "required": req.required}, actual=None,
-                                      fix=f"ADD_HEADER {req.header} (required={req.required})", operation_id=op.operation_id)
+                                      fix=f"ADD_HEADER {req.header} (required={str(req.required).lower()})",
+                                      operation_id=op.operation_id)
             elif req.required and not any(p.get("required") for p in found):
+                # required=false: basta che esista, l'obbligatorietà dichiarata dall'API non si tocca
                 yield self._violation(rule, op.pointer, f"{op.label}: l'header {req.header} deve essere required",
-                                      expected={"required": True}, actual={"required": False},
+                                      expected={"header": req.header, "required": True}, actual={"required": False},
                                       fix=f"ADD_HEADER {req.header} required=true", operation_id=op.operation_id)
 
     def _eval_requireQueryParameter(self, rule: CompiledRule, req: RequireQueryParameter) -> Iterator[Violation]:

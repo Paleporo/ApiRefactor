@@ -243,7 +243,9 @@ async def test_pipeline_does_not_relax_a_mandatory_parameter_end_to_end(config, 
     agents.interpreter = interpreter
     result = await RefactorPipeline(config, agents.provider(), rules_dir).run(spec_file)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # il caso 003 converte le response di errore (breaking, atteso); nessuna modifica breaking su `limit`
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
+    assert not [b for b in result.breaking_changes if "parameters" in b["location"]]
     assert result.final.data["paths"]["/accounts"]["get"]["parameters"][0]["required"] is True
     assert not [v for it in result.iterations for v in it.governance if v.rule_id == "PAGE-LIMIT-001"]
     assert not [c for c in result.applied if c.rule_id == "PAGE-LIMIT-001"]

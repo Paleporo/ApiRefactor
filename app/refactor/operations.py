@@ -28,7 +28,8 @@ class AddHeader(_Op):
     type: Literal["ADD_HEADER"] = "ADD_HEADER"
     target: str = Field(description="JSON pointer dell'operation, es. /paths/~1payments/post")
     header: str
-    required: bool = True
+    required: bool = Field(False, description="false: aggiunge l'header opzionale solo se manca, non modifica mai "
+                                              "un header esistente; true: lo aggiunge o lo rende obbligatorio")
     schema_: dict[str, Any] = Field(default_factory=lambda: {"type": "string"}, alias="schema")
     description: str | None = None
 

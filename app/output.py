@@ -95,7 +95,9 @@ class OutputWriter:
             "changes": [c.dump() for c in r.final_diff],
         })
         _write_json(reports / "summary.json", {
-            "status": r.status.value, "reasons": r.reasons, "source": r.source.source_file,
+            "status": r.status.value,
+            "breakingChanges": r.breaking_changes,
+            "reasons": r.reasons, "source": r.source.source_file,
             "sourceVersion": r.source.source_version.value, "targetVersion": r.source.target_version.value,
             "iterations": len(r.iterations), "finalIteration": r.final_iteration,
             "output": {"iteration": r.final_iteration, "isBaseline": r.output_is_baseline, "note": r.output_note},

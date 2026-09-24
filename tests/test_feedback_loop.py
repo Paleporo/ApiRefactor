@@ -197,7 +197,8 @@ async def test_case_003_error_format_fixed_deterministically_despite_a_misbehavi
     provider = agents.provider()
     result = await RefactorPipeline(config, provider, rules_dir).run(spec_file)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # rename della proprietà e conversione degli errori: breaking attesi
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
     for ptr in (R400, "/paths/~1accounts~1{account-id}/get/responses/404"):
         assert jp.resolve(result.final.data, ptr)["content"] == {
             "application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}

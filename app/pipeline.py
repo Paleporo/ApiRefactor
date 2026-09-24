@@ -61,6 +61,9 @@ PHASES = ("compile", "plan", "engine", "validation", "critic", "correction")
 
 class RunStatus(StrEnum):
     SUCCESS = "SUCCESS"
+    # tutte le condizioni soddisfatte, ma l'output contiene modifiche breaking (attese, motivate da regole):
+    # i client esistenti vanno informati/aggiornati, quindi non è un successo "pieno"
+    SUCCESS_WITH_BREAKING_CHANGES = "SUCCESS_WITH_BREAKING_CHANGES"
     NEEDS_REVIEW = "NEEDS_REVIEW"
     FAILED = "FAILED"
 
@@ -161,6 +164,7 @@ class RunResult(BaseModel):
     final_validation: list[Violation] = Field(default_factory=list)
     final_governance: list[Violation] = Field(default_factory=list)
     final_diff: list[DiffChange] = Field(default_factory=list)
+    breaking_changes: list[dict[str, Any]] = Field(default_factory=list)
     output_is_baseline: bool = False
     output_note: str | None = None
     fragment_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -338,6 +342,8 @@ class RefactorPipeline:
             result.final_governance = governance.validate(final.doc)
             result.final_diff = compute_diff(baseline, final.doc, final.applied)
             final_untraced = untraced_violations(result.final_diff, source.source_file)
+        result.breaking_changes = [{"location": c.location, "type": c.type.value, "ruleId": c.rule_id,
+                                    "expected": c.expected} for c in result.final_diff if c.breaking]
         result.final_applied = final.applied
         result.applied = accepted[-1].applied if len(accepted) > 1 else list(lineage)
         result.baseline_counts = base_eval.counts()
@@ -350,7 +356,9 @@ class RefactorPipeline:
         result.elapsed_seconds = round(deadline.elapsed, 2)
         record = next((r for r in result.iterations if r.iteration == final.iteration and not r.rejected), None)
         result.status = self._decide(result, final, record, final_untraced, llm_failures)
-        log.info("[FINAL] stato: %s%s", result.status.value, f" — {'; '.join(result.reasons)}" if result.reasons else "")
+        log.info("[FINAL] stato: %s%s", result.status.value, f" - {'; '.join(result.reasons)}" if result.reasons else "")
+        for b in result.breaking_changes:
+            log.warning("[FINAL] BREAKING %s @ %s (ruleId %s)", b["type"], b["location"], b["ruleId"])
         log.info("[FINAL] tempi per fase (s): %s", result.timings)
         return result
 
@@ -517,7 +525,9 @@ class RefactorPipeline:
                 "regole non compilate in modo conforme, attive solo come giudizio: "
                 + "; ".join(f"{f['ruleId']} ({Path(f['file']).name}:{f['line']}): {f['reason']}"
                             for f in result.compile_failed_rules))
-        return RunStatus.SUCCESS if ok else RunStatus.NEEDS_REVIEW
+        if not ok:
+            return RunStatus.NEEDS_REVIEW
+        return RunStatus.SUCCESS_WITH_BREAKING_CHANGES if result.breaking_changes else RunStatus.SUCCESS
 
     # ── helper ─────────────────────────────────────────────────────────
     @staticmethod

@@ -33,7 +33,8 @@ async def test_ollama_compiles_rules_and_refactors_case_003(ollama_config, rules
         APIS / "case-003-no-problem-details.yaml")
     # con un LLM reale non si pretende SUCCESS, ma la pipeline deve concludersi con uno stato esplicito,
     # un documento valido e nessun change non tracciato
-    assert result.status in (RunStatus.SUCCESS, RunStatus.NEEDS_REVIEW)
+    # le response di errore convertite cambiano media type: breaking atteso -> SUCCESS_WITH_BREAKING_CHANGES
+    assert result.status in (RunStatus.SUCCESS_WITH_BREAKING_CHANGES, RunStatus.NEEDS_REVIEW)
     assert not [v for v in result.final_validation if v.severity == "ERROR"]
     assert all(c.expected for c in result.final_diff if c.breaking)
     assert all(r.requirements for r in result.registry.compiled)
@@ -107,3 +108,17 @@ async def test_ollama_compiles_query_parameter_rule_and_keeps_inexpressible_ones
     # "che restituiscono collezioni" non è esprimibile con condition: deve restare judgment, non il requisito più simile
     pagination = await interpreter.compile_rule(parse_markdown_rules(rules_dir / "pagination.md")[0])
     assert [r.kind for r in pagination.requirements] == ["judgment"]
+
+
+async def test_ollama_case_005_idempotency_header_is_supported_not_required(ollama_config, rules_dir):
+    """Regressione: "supportare Idempotency-Key" era compilata con required=true e l'header obbligatorio
+    aggiunto a POST /cards (breaking, ma "expected") chiudeva la run in SUCCESS."""
+    result = await RefactorPipeline(ollama_config, OllamaProvider(ollama_config), rules_dir).run(
+        APIS / "case-005-regression-guard.yaml")
+    rule = result.registry.get("HTTP-IDEMPOTENCY-001")
+    assert not rule.compile_failed and rule.condition.methods == ["post"]
+    assert [(r.kind, r.required) for r in rule.requirements] == [("requireHeader", False)]
+    params = result.final.data["paths"]["/cards"]["post"].get("parameters", [])
+    assert [p.get("required") for p in params if p.get("name", "").lower() == "idempotency-key"] == [False]
+    assert result.breaking_changes == []
+    assert result.status in (RunStatus.SUCCESS, RunStatus.NEEDS_REVIEW)  # mai SUCCESS_WITH_BREAKING_CHANGES qui

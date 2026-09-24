@@ -151,7 +151,8 @@ uv run --extra server uvicorn app.api:app  # servizio REST opzionale: GET /healt
 ```
 
 Exit code della CLI: `0` SUCCESS (oppure specifica senza path), `1` NEEDS_REVIEW, `2` FAILED,
-`3` errore di input o configurazione (file non parsabile, Ollama non raggiungibile, tool mancante, collisione
+`4` SUCCESS_WITH_BREAKING_CHANGES (il messaggio finale elenca le modifiche breaking), `3` errore di input o
+configurazione (file non parsabile, Ollama non raggiungibile, tool mancante, collisione
 di `ruleId`, …). Gli errori attesi producono un messaggio leggibile, mai uno stack trace Python.
 
 ---
@@ -189,8 +190,16 @@ output/<api-name>/
 Stato finale:
 
 - **SUCCESS**: il candidato finale è OpenAPI valido, non ha ERROR di governance, non ha change di
-  contratto non tracciati, il Critic l'ha accettato, nessuna operazione o chiamata LLM è fallita e tutte le
-  regole in linguaggio naturale sono state compilate in modo conforme.
+  contratto non tracciati, il Critic l'ha accettato, nessuna operazione o chiamata LLM è fallita, tutte le
+  regole in linguaggio naturale sono state compilate in modo conforme e l'output non contiene modifiche
+  breaking.
+- **SUCCESS_WITH_BREAKING_CHANGES** (exit code `4`): come SUCCESS, ma l'output contiene almeno una modifica
+  breaking, anche se attesa e motivata da una regola. Per esempio un header reso obbligatorio, una proprietà
+  rinominata o una security aggiunta a un'operation pubblica. Il risultato è corretto, ma i client esistenti
+  vanno informati o aggiornati, quindi non è un successo pieno. `summary.json` elenca queste modifiche in
+  testa, nel campo `breakingChanges` (`location`, `type`, `ruleId`, `expected`), e la CLI le stampa nel
+  messaggio finale. Ho preferito uno stato dedicato a un flag dentro SUCCESS, perché lo stato e l'exit code
+  sono ciò che una pipeline CI controlla: con un flag, un "successo" breaking passerebbe inosservato.
 - **NEEDS_REVIEW**: il candidato è valido, ma qualcosa resta aperto: `maxIterations` o `runTimeoutSeconds`
   raggiunti, violazioni residue, Critic non convinto, frammenti LLM falliti, oppure almeno una regola finita
   `compileFailed`. Una regola `compileFailed` resta attiva solo come giudizio e quindi non è verificata
@@ -266,6 +275,16 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   regola resta attiva solo come `judgment` marcata `compileFailed`, con un avviso nel governance report. Lo
   stesso controllo si applica alle regole lette dalla cache: se una non è conforme, il file viene
   ricompilato. Le regole solo-giudizio non vengono controllate, perché non si applicano meccanicamente.
+- **`requireHeader` e `requireQueryParameter`: `required` senza default.** Il modello deve sempre
+  dichiararlo. `required: true` si usa solo se la regola dice esplicitamente che il parametro è obbligatorio
+  o va sempre inviato; verbi come "supportare", "accettare", "gestire" significano che l'API deve accettare
+  il parametro, non pretenderlo, quindi `required: false`. È il caso di HTTP-IDEMPOTENCY-001, che con il
+  vecchio default `true` aggiungeva un `Idempotency-Key` obbligatorio (breaking) a POST /cards e chiudeva la
+  run in SUCCESS. Il nome dell'header si confronta senza distinguere maiuscole e minuscole.
+  `DSL_VERSION` passa a `3`, così tutte le regole in cache vengono ricompilate. Non si può invalidare solo
+  `requireHeader`: in cache il valore `required: true` è salvato allo stesso modo sia quando veniva dal
+  vecchio default sia quando era una scelta del modello, quindi non si possono distinguere. Inoltre lo schema
+  inviato al modello è cambiato, perché `required` è diventato obbligatorio.
 - **`requireQueryParameter`** (`name`, `required`, più `condition.methods`, per esempio `["get"]`): con
   `required: false` il parametro deve solo **esistere**, dichiarato a livello di operation, di path o via `$ref`.
   La sua obbligatorietà non viene verificata né modificata: una regola di paginazione non deve rendere
@@ -476,6 +495,7 @@ I titoli (`#`) fanno da sezione e vengono passati all'LLM come contesto.
 ```bash
 uv run pytest                        # suite di default: veloce, deterministica, senza Ollama
 uv run pytest -m requires_ollama     # integrazione end-to-end con il vero Ollama (lenta su CPU)
+uv run pytest -m requires_ollama tests/test_critic_quality.py   # solo la qualità del Critic
 ```
 
 La suite di default usa un `LlmProvider` finto e deterministico (`app/llm/fake.py` + `tests/fake_agents.py`):
@@ -492,10 +512,27 @@ I test che richiedono i tool Node vengono saltati, con il motivo, se `spectral` 
 | CASE 004 | `apis/case-004-incomplete-security.yaml` | security scheme bearer aggiunto, requirement su tutte le operation, restrizione marcata breaking e tracciata |
 | CASE 005 | `apis/case-005-regression-guard.yaml` | regressione simulata (404 rimossa senza motivo): il Critic la segnala, il claim è verificato sul diff e blocca l'accettazione, la correzione ripristina la 404. Con la regressione persistente nessun candidato migliora la baseline: dopo `maxIterations` lo stato è NEEDS_REVIEW e l'output è l'originale. Un claim falso del Critic viene smentito e non blocca |
 
+Stati attesi: i CASE 001–004 chiudono in `SUCCESS_WITH_BREAKING_CHANGES`. Le loro modifiche breaking sono
+attese e motivate dalle regole: nel 001 la security passa da apiKey a bearer, nel 002 le proprietà vengono
+rinominate, nel 003 cambia il media type delle response di errore, nel 004 la security viene aggiunta. Il
+CASE 005 chiude in `SUCCESS`, perché `Idempotency-Key` viene aggiunto come opzionale.
+
 Altri test coprono: errori di parsing con riga e colonna, specifica vuota, `$ref` circolari, cache delle
 regole e sua invalidazione, collisioni di `ruleId`, conflitti tra regole e tra operazioni del piano, target
 mancanti nell'engine, tabella breaking, retry tecnici, timeout per chiamata e per run, preflight,
 pipeline senza regole, formato della richiesta a Ollama (con trasporto HTTP simulato, incluso `think`).
+**Qualità del Critic** (`tests/test_critic_quality.py`, `requires_ollama`). I candidati difettosi sono
+costruiti in modo deterministico dai casi esistenti, senza Refactor Agent: response 404 rimossa (caso 005),
+campo `required` rimosso da uno schema usato in request (caso 002), tipo di una proprietà cambiato da string
+a integer (caso 005). Il Critic reale, con il modello di `config.yaml`, viene invocato sul frammento
+modificato e deve produrre almeno una issue bloccante pertinente: confermata dal semantic diff, oppure
+localizzata sul difetto. C'è anche un caso di controllo senza difetti, in cui il Critic deve accettare.
+Esito e durata di ogni caso sono stampati a fine run e salvati in `output/critic-quality.json`.
+
+In `tests/test_headers_and_breaking.py`: semantica di `requireHeader` sui tre livelli di dichiarazione,
+Idempotency-Key opzionale in SUCCESS, header obbligatorio → `SUCCESS_WITH_BREAKING_CHANGES` con
+`breakingChanges` ed exit code 4 dalla CLI, ricompilazione della cache del DSL precedente.
+
 In `tests/test_feedback_loop.py`: correzioni deterministiche e valori generati, operazioni senza violazioni
 scartate, `SET_FIELD` non motivati, target normalizzati o ambigui, Critic non invocato con ERROR di
 governance, correzione peggiorativa scartata con output = miglior candidato, output = originale quando

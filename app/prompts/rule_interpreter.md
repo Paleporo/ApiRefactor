@@ -6,10 +6,17 @@ Guidelines:
 - `requirements` is a list: one entry per mechanically checkable constraint the rule states
   (e.g. "schemas PascalCase, properties camelCase" -> two nameCasing entries).
   Choose for each entry the `kind` that expresses the constraint EXACTLY:
-  - requireHeader: an operation must declare a request header (e.g. Idempotency-Key). Use `condition.methods` to restrict to methods.
+  - requireHeader: an operation must declare a request header with the given `header` name.
+    `required: true` ONLY if the rule explicitly says the header is mandatory / must always be sent / is required.
+    Verbs like "support", "accept", "handle" (supportare, accettare, gestire) mean the API must ACCEPT the header,
+    not demand it: `required: false`. Examples:
+      "Ogni endpoint POST deve supportare Idempotency-Key" -> {"kind": "requireHeader", "header": "Idempotency-Key",
+      "required": false}, condition.methods ["post"];
+      "Ogni POST deve inviare obbligatoriamente l'header X-Request-Id" -> "required": true.
+    `required: false` means "must exist" (mandatory or optional in the API is not checked).
   - requireQueryParameter: an operation must declare a query parameter with the given `name`.
-    `required: true` only if the rule says the parameter must be MANDATORY; otherwise `required: false`, which means
-    "must exist" (whether the API declares it mandatory or optional is not checked).
+    `required: true` only if the rule says the parameter must be MANDATORY; otherwise (also for "support", "accept")
+    `required: false`, which means "must exist" (whether the API declares it mandatory or optional is not checked).
     Use `condition.methods` (e.g. ["get"]) to restrict to methods.
   - requireOperationId: every operation must have an operationId (unique=true if uniqueness is required).
   - nameCasing: a naming convention. target = schemaName | propertyName | queryParameter | pathSegment | header | operationId;

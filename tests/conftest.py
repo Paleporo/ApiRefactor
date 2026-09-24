@@ -11,6 +11,7 @@ from tests.fake_agents import FakeAgents
 
 ROOT = Path(__file__).resolve().parent.parent
 APIS = ROOT / "apis"
+CRITIC_QUALITY_RESULTS: list[dict] = []  # riempito da tests/test_critic_quality.py
 
 configure_logging("INFO")
 
@@ -57,3 +58,22 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "needs_node" in item.keywords:
             item.add_marker(marker)
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config):
+    """Esito e durata dei casi di qualità del Critic (solo se eseguiti): terminale + output/critic-quality.json."""
+    if not CRITIC_QUALITY_RESULTS:
+        return
+    import json
+
+    tr = terminalreporter
+    tr.section("Qualità del Critic (Ollama reale)")
+    for r in CRITIC_QUALITY_RESULTS:
+        tr.write_line(f"{'OK  ' if r['ok'] else 'FAIL'} {r['seconds']:>7.1f}s  {r['case']}  "
+                      f"(accepted={r['accepted']}, bloccanti={len(r['blocking'])}, pertinenti={r['pertinent']})")
+        for b in r["blocking"]:
+            tr.write_line(f"            - {b}")
+    out = ROOT / "output" / "critic-quality.json"
+    out.parent.mkdir(exist_ok=True)
+    out.write_text(json.dumps(CRITIC_QUALITY_RESULTS, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    tr.write_line(f"Report: {out}")
