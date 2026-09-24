@@ -181,9 +181,13 @@ output/<api-name>/
 Stato finale:
 
 - **SUCCESS**: il candidato finale è OpenAPI valido, non ha ERROR di governance, non ha change di
-  contratto non tracciati, il Critic l'ha accettato e nessuna operazione o chiamata LLM è fallita.
+  contratto non tracciati, il Critic l'ha accettato, nessuna operazione o chiamata LLM è fallita e tutte le
+  regole in linguaggio naturale sono state compilate in modo conforme.
 - **NEEDS_REVIEW**: il candidato è valido, ma qualcosa resta aperto: `maxIterations` o `runTimeoutSeconds`
-  raggiunti, violazioni residue, Critic non convinto, frammenti LLM falliti. Serve una revisione umana.
+  raggiunti, violazioni residue, Critic non convinto, frammenti LLM falliti, oppure almeno una regola finita
+  `compileFailed`. Una regola `compileFailed` resta attiva solo come giudizio e quindi non è verificata
+  meccanicamente. In quel caso `summary.json` elenca le regole in `compileFailedRules` (`ruleId`, `file`,
+  `line`, `reason`) e il motivo compare anche in `reasons`. Serve una revisione umana.
 - **FAILED**: il candidato finale non è una specifica OpenAPI valida.
 
 Se l'ultima iterazione produce un documento non valido, l'output è l'ultimo candidato valido, e il report

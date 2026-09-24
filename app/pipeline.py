@@ -96,6 +96,7 @@ class RunResult(BaseModel):
     final_governance: list[Violation] = Field(default_factory=list)
     final_diff: list[DiffChange] = Field(default_factory=list)
     fragment_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    compile_failed_rules: list[dict[str, Any]] = Field(default_factory=list)
     llm_calls: int = 0
     elapsed_seconds: float = 0.0
 
@@ -309,6 +310,17 @@ class RefactorPipeline:
             result.reasons.append(f"chiamate LLM fallite dopo i retry tecnici sui frammenti: {sorted(set(llm_failures))}")
         if any("Budget complessivo" in r for r in result.reasons):
             ok = False
+        # una regola non compilata in modo conforme non è verificata meccanicamente: il risultato va rivisto
+        reasons = getattr(result.compile_report, "failure_reasons", {}) or {}
+        result.compile_failed_rules = [
+            {"ruleId": r.id, "file": r.file, "line": r.line, "reason": reasons.get(r.id, "motivo non registrato")}
+            for r in (result.registry.compiled if result.registry else []) if r.compile_failed]
+        if result.compile_failed_rules:
+            ok = False
+            result.reasons.append(
+                "regole non compilate in modo conforme, attive solo come giudizio: "
+                + "; ".join(f"{f['ruleId']} ({Path(f['file']).name}:{f['line']}): {f['reason']}"
+                            for f in result.compile_failed_rules))
         return RunStatus.SUCCESS if ok else RunStatus.NEEDS_REVIEW
 
     @staticmethod

@@ -94,5 +94,6 @@ class OutputWriter:
                                for it in r.iterations],
             "finalValidation": count_by_severity(r.final_validation),
             "finalGovernance": count_by_severity(r.final_governance),
+            "compileFailedRules": r.compile_failed_rules,
             "llmCalls": r.llm_calls, "elapsedSeconds": r.elapsed_seconds,
         })

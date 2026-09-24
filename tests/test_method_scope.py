@@ -124,7 +124,17 @@ async def test_case_003_get_operations_never_receive_idempotency_key(config, age
     result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-003-no-problem-details.yaml")
     out = OutputWriter(tmp_path / "output").write(result)
 
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    # la regola non è verificata meccanicamente: la run non può chiudere in SUCCESS
+    assert result.status == RunStatus.NEEDS_REVIEW
+    [reason] = result.reasons
+    assert "HTTP-IDEMPOTENCY-001" in reason and "condition.methods is null" in reason
+    summary = json.loads((out / "reports" / "summary.json").read_text())
+    assert summary["status"] == "NEEDS_REVIEW" and summary["reasons"] == result.reasons
+    [failed] = summary["compileFailedRules"]
+    assert failed["ruleId"] == "HTTP-IDEMPOTENCY-001" and failed["file"].endswith("general.md")
+    assert "condition.methods is null" in failed["reason"]
+    # tutto il resto è pulito: l'unico motivo di revisione è la regola non compilata
+    assert all(it.exit_conditions.all_met for it in result.iterations[-1:])
     for item in result.final.data["paths"].values():
         for op in item.values():
             assert not any(p.get("name") == "Idempotency-Key" for p in op.get("parameters", []))
@@ -134,3 +144,30 @@ async def test_case_003_get_operations_never_receive_idempotency_key(config, age
     report = json.loads((out / "reports" / "governance-report.json").read_text())
     assert "HTTP-IDEMPOTENCY-001" in report["rules"]["compileCache"]["failed"]
     assert any("HTTP-IDEMPOTENCY-001" in w for w in report["rules"]["warnings"])
+
+
+@pytest.mark.needs_node
+async def test_any_compile_failed_rule_forces_needs_review(config, agents, rules_dir, tmp_path):
+    """Qualunque causa di compileFailed (qui: output non conforme allo schema) porta a NEEDS_REVIEW."""
+    def interpreter(request):
+        if request.context["ruleId"] == "SEC-001":
+            return "non è JSON"
+        return interpreter_answer(request)
+
+    agents.interpreter = interpreter
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-005-regression-guard.yaml")
+    out = OutputWriter(tmp_path / "output").write(result)
+
+    assert result.status == RunStatus.NEEDS_REVIEW
+    summary = json.loads((out / "reports" / "summary.json").read_text())
+    assert [f["ruleId"] for f in summary["compileFailedRules"]] == ["SEC-001"]
+    assert "schema" in summary["compileFailedRules"][0]["reason"]
+    assert any("SEC-001" in r for r in summary["reasons"])
+
+
+@pytest.mark.needs_node
+async def test_no_compile_failed_rules_keeps_success_and_empty_list(config, agents, rules_dir, tmp_path):
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-005-regression-guard.yaml")
+    out = OutputWriter(tmp_path / "output").write(result)
+    assert result.status == RunStatus.SUCCESS, result.reasons
+    assert json.loads((out / "reports" / "summary.json").read_text())["compileFailedRules"] == []
