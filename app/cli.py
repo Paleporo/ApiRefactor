@@ -34,7 +34,10 @@ def _parser() -> argparse.ArgumentParser:
     ref.add_argument("--output", help="cartella di output (override di outputDir)")
     ref.add_argument("--max-iterations", type=int, help="override di maxIterations")
     ref.add_argument("--target-version", choices=["3.0", "3.1"], help="override di targetOpenApiVersion")
+    ref.add_argument("--api-lifecycle", choices=["draft", "published"], help="override di apiLifecycle")
     ref.add_argument("--run-timeout", type=float, help="override di runTimeoutSeconds")
+    ref.add_argument("--resume", action="store_true",
+                     help="riprende una run interrotta dall'ultimo checkpoint (output/<api>/.checkpoint)")
     common(ref)
 
     pre = sub.add_parser("preflight", help="verifica Ollama, modelli e tool esterni senza eseguire la pipeline")
@@ -57,6 +60,7 @@ def _config(args: argparse.Namespace):
         output_dir=getattr(args, "output", None),
         max_iterations=getattr(args, "max_iterations", None),
         target_openapi_version=getattr(args, "target_version", None),
+        api_lifecycle=getattr(args, "api_lifecycle", None),
         run_timeout_seconds=getattr(args, "run_timeout", None),
     )
 
@@ -94,13 +98,19 @@ async def _compile_rules(config) -> int:
 async def _refactor(config, args) -> int:
     from app.service import refactor_file
 
-    outcome, result = await refactor_file(config, args.input, config.output_dir, config.rules_dir)
+    outcome, result = await refactor_file(config, args.input, config.output_dir, config.rules_dir,
+                                          resume=args.resume)
     print()
     print(f"Stato finale: {outcome.status}  (iterazioni: {outcome.iterations}, chiamate LLM: {result.llm_calls}, "
           f"{result.elapsed_seconds:.1f}s)")
+    if result.resumed:
+        print(f"  Ripresa da checkpoint: {result.replayed_llm_calls} risposte LLM riutilizzate")
     if result.breaking_changes:
-        print(f"  ATTENZIONE: {len(result.breaking_changes)} modifiche BREAKING nell'output "
-              "(i client esistenti vanno aggiornati):")
+        if result.api_lifecycle == "draft":
+            print(f"  {len(result.breaking_changes)} modifiche breaking, ammesse (apiLifecycle: draft):")
+        else:
+            print(f"  ATTENZIONE: {len(result.breaking_changes)} modifiche BREAKING nell'output "
+                  "(i client esistenti vanno aggiornati):")
         for b in result.breaking_changes:
             print(f"    * {b['type']} @ {b['location']} (ruleId {b['ruleId']})")
     for reason in outcome.reasons:
@@ -127,7 +137,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", exc)
         return exc.exit_code
     except KeyboardInterrupt:
-        log.error("Interrotto dall'utente")
+        log.error("Interrotto dall'utente: riprendi con lo stesso comando e --resume")
         return 130
 
 

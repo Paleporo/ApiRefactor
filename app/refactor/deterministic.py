@@ -17,6 +17,12 @@ Valori generati (scelte documentate anche nel README):
   flussi, URL) non deducibili: restano all'LLM. Se l'operation ha già altri security requirement, sostituirli
   cambierebbe chi può accedere: resta all'LLM.
 - query parameter e header aggiunti: schema `{"type": "string"}`.
+
+Naming (requisiti nameCasing e regole Spectral di casing, dedotte dal ruleset): proprietà, parametri
+(query, header, path), segmenti di path, nomi di schema, operationId. Il nome convertito (vedi
+app/validators/casing.py) si usa solo se è conforme; in caso di collisione (il nome esiste già, o due nomi
+diventerebbero uguali) non si rinomina nulla e la violazione passa all'LLM. Le rinomine aggiornano tutti i
+riferimenti (app/refactor/references.py) e sono tracciate con il loro ruleId; quelle sul wire sono breaking.
 """
 
 from __future__ import annotations
@@ -32,9 +38,9 @@ from app.model.issues import Violation, ViolationSource
 from app.model.refs import RefIndex
 from app.refactor import operations as ops
 from app.refactor.fragments import Fragment, fragment_for
-from app.rules.models import CompiledRule
-from app.rules.registry import RuleRegistry
-from app.validators.casing import words
+from app.rules.models import Casing, CompiledRule, NameTarget, SpectralRule
+from app.rules.registry import RuleRegistry, spectral_casing
+from app.validators.casing import convert, convert_checked, words
 
 PROPOSER = "deterministic"
 _PROBLEM_BASE: dict[str, dict[str, Any]] = {
@@ -53,9 +59,14 @@ class DeterministicPlan(BaseModel):
     # elementi (response) che le operazioni deterministiche riscrivono: le altre violazioni su questi elementi
     # non vanno all'LLM, che altrimenti proporrebbe modifiche concorrenti (es. REPLACE_RESPONSE_SCHEMA)
     covered: list[str] = Field(default_factory=list)
+    # elementi rinominati: le altre violazioni esattamente su quell'elemento (es. naming date/time su una
+    # proprietà che viene rinominata) si rivalutano dopo la rinomina invece di andare all'LLM
+    covered_exact: list[str] = Field(default_factory=list)
 
     def is_llm_visible(self, violation: Violation) -> bool:
         if any(violation is h for h in self.handled):
+            return False
+        if violation.path in self.covered_exact:
             return False
         return not any(jp.is_prefix(c, violation.path) for c in self.covered)
 
@@ -91,20 +102,30 @@ class DeterministicFixer:
         self._taken_ids = {op.operation_id for op in doc.operations() if op.operation_id}
         self._problem_ref: dict[tuple, str] = {}
         self._scheme_name: dict[tuple, str] = {}
+        self._renamed: dict[tuple, str] = {}  # (ambito, nome originale) -> nuovo nome pianificato
+        self._claimed: set[tuple] = set()  # (ambito, nuovo nome): per rilevare due nomi che diventano uguali
 
     # ── API ────────────────────────────────────────────────────────────
     def fix(self, violations: list[Violation]) -> DeterministicPlan:
         for v in violations:
-            if v.source != ViolationSource.COMPILED_RULE or v.requirement_index is None:
-                continue
             rule = self.registry.get(v.rule_id)
-            if not isinstance(rule, CompiledRule) or v.requirement_index >= len(rule.requirements):
+            if v.source == ViolationSource.SPECTRAL and isinstance(rule, SpectralRule):
+                casing = spectral_casing(rule)
+                if casing is None:
+                    continue  # regola Spectral senza correzione nota: all'LLM
+                produced = self._rename(v, *casing)
+            elif v.source == ViolationSource.COMPILED_RULE and v.requirement_index is not None \
+                    and isinstance(rule, CompiledRule) and v.requirement_index < len(rule.requirements):
+                req = rule.requirements[v.requirement_index]
+                handler = getattr(self, f"_fix_{req.kind}", None)
+                if handler is None:
+                    continue  # judgment: al Critic
+                produced = handler(v, req)
+            else:
                 continue
-            req = rule.requirements[v.requirement_index]
-            handler = getattr(self, f"_fix_{req.kind}", None)
-            if handler is None:
-                continue  # nameCasing, judgment: all'LLM
-            produced = handler(v, req)
+            if produced == ["already-planned"]:
+                self.plan.handled.append(v)  # stesso path già rinominato per un'altra violazione
+                continue
             if produced:
                 self.plan.handled.append(v)
                 fragment = fragment_for(v.path, self.fragments).pointer or "/"
@@ -115,6 +136,132 @@ class DeterministicFixer:
     @staticmethod
     def _op(data: dict[str, Any]):
         return ops.OperationsProposal.model_validate({"operations": [data]}).operations[0]
+
+    # ── naming ─────────────────────────────────────────────────────────
+    def _fix_nameCasing(self, v: Violation, req) -> list:
+        return self._rename(v, req.target, req.casing)
+
+    def _claim(self, scope: tuple, old: str, new: str, existing: set[str], casing: Casing | None = None) -> bool:
+        """Prenota la rinomina old -> new nell'ambito; False in caso di collisione.
+
+        Collisione: `new` esiste già, oppure un altro nome dello stesso ambito diventerebbe anch'esso `new`
+        (es. order_total e order__total -> orderTotal). In quel caso nessuno dei due viene rinominato.
+        """
+        key = (*scope, old)
+        if key in self._renamed:
+            return self._renamed[key] == new  # già pianificata (es. violata da due regole)
+        if new in existing or (*scope, new) in self._claimed:
+            return False
+        if casing is not None and any(n != old and convert(n, casing) == new for n in existing):
+            return False
+        self._renamed[key] = new
+        self._claimed.add((*scope, new))
+        return True
+
+    def _rename(self, v: Violation, target: NameTarget, casing: Casing) -> list:
+        tokens = jp.split(v.path)
+        rid = v.rule_id
+        if target == NameTarget.SCHEMA_NAME:
+            if len(tokens) != 3 or tokens[:2] != ["components", "schemas"]:
+                return []
+            old = tokens[2]
+            new = convert_checked(old, casing)
+            schemas = set(((self.doc.data.get("components") or {}).get("schemas") or {}))
+            if not new or not self._claim(("schema",), old, new, schemas, casing):
+                return []
+            self.plan.covered_exact.append(v.path)
+            return [self._op({"type": "RENAME_SCHEMA", "from": old, "to": new, "ruleId": rid})]
+
+        if target == NameTarget.PROPERTY_NAME:
+            if len(tokens) < 2 or tokens[-2] != "properties":
+                return []
+            schema_ptr, old = jp.join(tokens[:-2]), tokens[-1]
+            schema = self.doc.get(schema_ptr)
+            if not isinstance(schema, dict) or not isinstance(schema.get("properties"), dict):
+                return []
+            new = convert_checked(old, casing)
+            if not new or not self._claim(("property", schema_ptr), old, new, set(schema["properties"]), casing):
+                return []
+            self.plan.covered_exact.append(v.path)
+            return [self._op({"type": "RENAME_PROPERTY", "target": schema_ptr, "from": old, "to": new,
+                              "ruleId": rid})]
+
+        if target in (NameTarget.QUERY_PARAMETER, NameTarget.HEADER):
+            # .../parameters/<idx>/name nel path item o nell'operation che lo dichiara
+            if len(tokens) < 5 or tokens[0] != "paths" or tokens[-3] != "parameters" or tokens[-1] != "name":
+                return []
+            holder_ptr = jp.join(tokens[:-3])
+            param = self.doc.get(jp.join(tokens[:-1]))
+            location = "query" if target == NameTarget.QUERY_PARAMETER else "header"
+            if not isinstance(param, dict) or param.get("in") != location:
+                return []  # parametro via $ref: va rinominato il componente -> LLM
+            old = str(param.get("name"))
+            new = convert_checked(old, casing)
+            siblings = self._declared_names(holder_ptr, location, exclude=old)
+            if not new or not self._claim(("parameter", holder_ptr, location), old, new, siblings, casing):
+                return []
+            self.plan.covered_exact.append(jp.join(tokens[:-1]))
+            return [self._op({"type": "RENAME_PARAMETER", "target": holder_ptr, "in": location, "from": old,
+                              "to": new, "ruleId": rid})]
+
+        if target == NameTarget.PATH_SEGMENT:
+            return self._rename_path(v, casing)
+
+        if target == NameTarget.OPERATION_ID:
+            op_ptr = _operation_pointer(v.path)
+            old = (self.doc.get(op_ptr) or {}).get("operationId") if op_ptr else None
+            new = convert_checked(str(old), casing) if old else None
+            if not new or not self._claim(("operationId",), old, new, self._taken_ids, casing):
+                return []
+            self._taken_ids.add(new)
+            return [self._op({"type": "ADD_OPERATION_ID", "target": op_ptr, "operationId": new, "ruleId": rid})]
+        return []
+
+    def _declared_names(self, holder_ptr: str, location: str, exclude: str) -> set[str]:
+        """Nomi dei parametri `location` visibili dove vive holder_ptr (path item + operation)."""
+        tokens = jp.split(holder_ptr)
+        holders = [jp.join(tokens[:2])] + ([holder_ptr] if len(tokens) == 3 else
+                                             refs_operations(self.doc, tokens[1]))
+        names = set()
+        for ptr in holders:
+            for p in (self.doc.get(ptr) or {}).get("parameters") or []:
+                p = self.refs.resolve_ref(p)
+                if isinstance(p, dict) and p.get("in") == location and p.get("name") != exclude:
+                    names.add(str(p.get("name")))
+        # gli header non distinguono maiuscole: "X-Id" e "x-id" collidono
+        return names | ({n.lower() for n in names} if location == "header" else set())
+
+    def _rename_path(self, v: Violation, casing: Casing) -> list:
+        tokens = jp.split(v.path)
+        if len(tokens) != 2 or tokens[0] != "paths":
+            return []
+        path = tokens[1]
+        key = ("path-done", path)
+        if key in self._renamed:
+            return [] if self._renamed[key] == "" else ["already-planned"]
+        segments = path.split("/")
+        params = [s[1:-1] for s in segments if s.startswith("{") and s.endswith("}")]
+        param_new = {p: convert_checked(p, casing) for p in params}
+        param_new = {p: n for p, n in param_new.items() if n}
+        static_new = [s if (s.startswith("{") or not s or convert_checked(s, casing) is None)
+                      else convert_checked(s, casing) for s in segments]
+        if len(set(params)) != len({param_new.get(p, p) for p in params}):
+            self._renamed[key] = ""  # due path parameter diventerebbero uguali
+            return []
+        intermediate = "/".join("{" + param_new.get(s[1:-1], s[1:-1]) + "}" if s.startswith("{") else s
+                                for s in segments)
+        final = "/".join("{" + param_new.get(s[1:-1], s[1:-1]) + "}" if s.startswith("{") else n
+                         for s, n in zip(segments, static_new))
+        if final == path or not self._claim(("path",), path, final, set(self.doc.paths())):
+            self._renamed[key] = ""
+            return []
+        self._renamed[key] = final
+        ops_out = [self._op({"type": "RENAME_PARAMETER", "target": v.path, "in": "path", "from": p, "to": n,
+                             "ruleId": v.rule_id}) for p, n in param_new.items()]
+        if intermediate != final:  # applicato dopo le rinomine dei parametri (fase successiva del piano)
+            ops_out.append(self._op({"type": "RENAME_PATH", "from": intermediate, "to": final, "ruleId": v.rule_id}))
+        self.plan.covered_exact.append(v.path)
+        return ops_out
 
     # ── requisiti ──────────────────────────────────────────────────────
     def _fix_requireHeader(self, v: Violation, req) -> list:
@@ -224,6 +371,11 @@ class DeterministicFixer:
         for part in schema.get("allOf") or []:
             names += self._properties(part, depth + 1)
         return names
+
+
+def refs_operations(doc: SpecDocument, path: str) -> list[str]:
+    item = doc.paths().get(path) or {}
+    return [jp.join(["paths", path, m]) for m in HTTP_METHODS if isinstance(item.get(m), dict)]
 
 
 def deterministic_fixes(doc: SpecDocument, violations: list[Violation], registry: RuleRegistry,

@@ -25,6 +25,7 @@ from typing import Any, Iterator
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.checkpoint import Checkpoint, fingerprint
 from app.config import AppConfig
 from app.converter import ConversionResult, upgrade_to_target
 from app.correction import CorrectionEngine, Problem
@@ -165,6 +166,7 @@ class RunResult(BaseModel):
     final_governance: list[Violation] = Field(default_factory=list)
     final_diff: list[DiffChange] = Field(default_factory=list)
     breaking_changes: list[dict[str, Any]] = Field(default_factory=list)
+    api_lifecycle: str = "published"
     output_is_baseline: bool = False
     output_note: str | None = None
     fragment_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
@@ -172,6 +174,8 @@ class RunResult(BaseModel):
     timings: dict[str, float] = Field(default_factory=dict)
     llm_stats: dict[str, dict[str, float]] = Field(default_factory=dict)
     llm_calls: int = 0
+    resumed: bool = False
+    replayed_llm_calls: int = 0
     elapsed_seconds: float = 0.0
 
 
@@ -213,14 +217,22 @@ class RefactorPipeline:
             raise ExternalToolError(f"Ruleset Spectral presenti ma CLI Spectral non disponibile. {INSTALL_HINT}")
 
     # ── run ────────────────────────────────────────────────────────────
-    async def run(self, input_path: str | Path) -> RunResult:
+    async def run(self, input_path: str | Path, checkpoint_dir: str | Path | None = None,
+                  resume: bool = False) -> RunResult:
+        """`checkpoint_dir`: dove salvare il giornale delle risposte LLM; con `resume` la run riprende da lì."""
         deadline = Deadline(self.config.run_timeout_seconds)
         timer = PhaseTimer()
-        llm = StructuredLlm(self.provider, self.config.llm_call_timeout_seconds, self.config.llm_technical_retries,
-                            deadline)
 
         log.info("[LOAD] %s", input_path)
         source = load_spec(input_path, self.config.target_openapi_version)  # EmptySpecError/SpecParseError: uscita pulita
+        journal = None
+        if checkpoint_dir is not None:
+            journal = Checkpoint(Path(checkpoint_dir), fingerprint(Path(input_path), self.rules_dir, self.config),
+                                 resume).open()
+        elif resume:
+            raise ExternalToolError("--resume richiede una cartella di checkpoint")
+        llm = StructuredLlm(self.provider, self.config.llm_call_timeout_seconds, self.config.llm_technical_retries,
+                            deadline, journal=journal)
         await self.preflight(needs_spectral=bool(spectral_ruleset_files(self.rules_dir)))
 
         conversion = upgrade_to_target(source, self.config)
@@ -231,7 +243,7 @@ class RefactorPipeline:
                 type="UPDATE_OPENAPI_VERSION", rule_id=PIPELINE_VERSION_RULE, category=ChangeCategory.STRUCTURAL,
                 locations=["/openapi"], description=f"{source.openapi_version} -> {baseline.openapi_version} "
                                                     f"({conversion.tool})",
-                before=source.openapi_version, after=baseline.openapi_version))
+                before=source.openapi_version, after=baseline.openapi_version, proposed_by="pipeline"))
 
         log.info("[RULES] caricamento regole da %s", self.rules_dir)
         with timer.phase("compile"):
@@ -239,7 +251,8 @@ class RefactorPipeline:
             registry, compile_report = await build_registry(self.rules_dir, interpreter)
 
         result = RunResult(status=RunStatus.FAILED, source=source, baseline=baseline, final=baseline,
-                           conversion=conversion, registry=registry, compile_report=compile_report)
+                           conversion=conversion, registry=registry, compile_report=compile_report,
+                           api_lifecycle=self.config.api_lifecycle)
         oas = OpenAPIValidator()
         governance = GovernanceValidator(self.config, registry)
         planner = RefactoringPlanner(llm, registry, self.config.llm_context_token_budget)
@@ -351,6 +364,8 @@ class RefactorPipeline:
                                          diff=result.final_diff, untraced=final_untraced).counts()
         result.fragment_states = states
         result.llm_calls = llm.calls
+        result.resumed = resume
+        result.replayed_llm_calls = journal.replayed if journal else 0
         result.llm_stats = llm.stats
         result.timings = {**timer.seconds, "total": round(deadline.elapsed, 3)}
         result.elapsed_seconds = round(deadline.elapsed, 2)
@@ -402,11 +417,12 @@ class RefactorPipeline:
             log.info("[CRITIC] non invocato (%s): si passa direttamente alla correzione", reason)
             return CriticReport.skipped_for(iteration, f"{reason}: il candidato va prima corretto")
         fragments = build_fragments(doc)
-        to_review = self._fragments_to_review(baseline, doc, fragments, ev.diff, applied, states)
-        log.info("[CRITIC] %d frammenti da rivedere", len(to_review))
+        to_review, skipped = self._fragments_to_review(baseline, doc, fragments, ev.diff, applied, states)
+        log.info("[CRITIC] %d frammenti da rivedere, %d saltati", len(to_review), len(skipped))
         report = await critic.review(iteration=iteration, baseline=baseline, candidate=doc, fragments=to_review,
                                      applied=applied, diff=ev.diff, validation=ev.validation,
                                      governance=ev.governance + ev.untraced)
+        report.skipped_fragments = skipped
         reviewed = set(report.reviewed_fragments)
         for frag in fragments:
             key = frag.pointer or "/"
@@ -527,7 +543,9 @@ class RefactorPipeline:
                             for f in result.compile_failed_rules))
         if not ok:
             return RunStatus.NEEDS_REVIEW
-        return RunStatus.SUCCESS_WITH_BREAKING_CHANGES if result.breaking_changes else RunStatus.SUCCESS
+        if result.breaking_changes and self.config.api_lifecycle == "published":
+            return RunStatus.SUCCESS_WITH_BREAKING_CHANGES
+        return RunStatus.SUCCESS  # draft: le modifiche breaking restano elencate in breakingChanges
 
     # ── helper ─────────────────────────────────────────────────────────
     @staticmethod
@@ -540,27 +558,41 @@ class RefactorPipeline:
     @staticmethod
     def _fragments_to_review(baseline: SpecDocument, candidate: SpecDocument, fragments: list[Fragment],
                              diff: list[DiffChange], applied: list[AppliedChange],
-                             states: dict[str, dict[str, Any]]) -> list[Fragment]:
-        """Solo frammenti cambiati rispetto all'originale e non già accettati con lo stesso contenuto."""
+                             states: dict[str, dict[str, Any]]) -> tuple[list[Fragment], dict[str, str]]:
+        """Frammenti da far rivedere al Critic, e quelli cambiati ma saltati con il motivo.
+
+        Si rivede un frammento solo se contiene almeno una modifica proposta dall'LLM, o un change non tracciato
+        (possibile regressione). Le modifiche solo deterministiche sono già coperte da validatori e semantic diff;
+        un frammento già rivisto con lo stesso contenuto non si rivede.
+        """
         renames = RenameMap(applied)
-        touched = {renames.canonical(loc) for c in applied for loc in c.locations if c.rule_id != PIPELINE_VERSION_RULE}
-        touched |= {renames.canonical(c.location) for c in diff}
-        out = []
+        llm_sources = {"refactor", "correction"}
+        by_llm = {renames.canonical(loc) for c in applied if c.proposed_by in llm_sources for loc in c.locations}
+        untraced = {renames.canonical(c.location) for c in diff if not c.expected}
+        deterministic = {renames.canonical(loc) for c in applied if c.proposed_by not in llm_sources
+                         and c.rule_id != PIPELINE_VERSION_RULE for loc in c.locations}
+        deterministic |= {renames.canonical(c.location) for c in diff if c.expected}
+
+        def hits(frag: Fragment, locations: set[str]) -> bool:
+            if frag.kind == ElementKind.PATH:
+                return any(t == frag.pointer for t in locations)
+            if frag.pointer == "":
+                return any(jp.split(t)[:1] not in (["paths"], ["components"]) or
+                           t.startswith("/components/securitySchemes") for t in locations)
+            return any(jp.is_prefix(frag.pointer, t) for t in locations)
+
+        out: list[Fragment] = []
+        skipped: dict[str, str] = {}
         for frag in fragments:
             key = frag.pointer or "/"
-            fp = _content_fp(candidate, frag)
-            if states.get(key, {}).get("fingerprint") == fp:
-                continue  # già rivisto con questo contenuto: non si ripete il lavoro
-            if frag.kind == ElementKind.PATH and not any(t == frag.pointer for t in touched):
-                continue
-            if frag.pointer == "":
-                changed = any(jp.split(t)[:1] not in (["paths"], ["components"]) or
-                              t.startswith("/components/securitySchemes") for t in touched)
-            else:
-                changed = any(jp.is_prefix(frag.pointer, t) for t in touched)
-            if changed:
-                out.append(frag)
-        return out
+            if hits(frag, by_llm) or hits(frag, untraced):
+                if states.get(key, {}).get("fingerprint") == _content_fp(candidate, frag):
+                    skipped[key] = "già rivisto con lo stesso contenuto"
+                else:
+                    out.append(frag)
+            elif hits(frag, deterministic):
+                skipped[key] = "solo correzioni deterministiche: coperto da validatori e semantic diff"
+        return out, skipped
 
     @staticmethod
     def _correction_targets(fragments: list[Fragment], violations: list[Violation], report: CriticReport,

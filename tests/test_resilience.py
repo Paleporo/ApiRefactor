@@ -56,8 +56,8 @@ async def test_preflight_fails_fast_when_ollama_unreachable():
 @pytest.mark.needs_node
 async def test_failed_fragments_are_reported_and_prevent_success(config, agents, rules_dir):
     agents.refactor = lambda r: LlmCallError("modello caduto")
-    # caso 002: i rename (nameCasing) restano all'LLM, che qui fallisce
-    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-002-naming.yaml")
+    # caso 001: SEC-001 resta all'LLM (le operation hanno già un requisito apiKey), che qui fallisce
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-001-swagger2-legacy.yaml")
     assert result.plans[0].failed_fragments
     assert result.status == RunStatus.NEEDS_REVIEW
     assert any("chiamate LLM fallite" in r for r in result.reasons)

@@ -182,6 +182,8 @@ class AppliedChange(BaseModel):
     before: Any = None
     after: Any = None
     iteration: int = 0
+    # chi ha proposto l'operazione: deterministic | refactor | correction | pipeline
+    proposed_by: str = Field("", alias="proposedBy")
 
 
 class ApplyFailure(BaseModel):

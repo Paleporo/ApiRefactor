@@ -64,8 +64,10 @@ def _require_discriminators(node: Any) -> None:
 
 
 class StructuredLlm:
-    def __init__(self, provider: LlmProvider, call_timeout: float, technical_retries: int, deadline: Deadline | None = None):
+    def __init__(self, provider: LlmProvider, call_timeout: float, technical_retries: int, deadline: Deadline | None = None,
+                 journal: Any = None):
         self.provider = provider
+        self.journal = journal  # app.checkpoint.Checkpoint: risposte già ottenute in una run interrotta
         self.call_timeout = call_timeout
         self.technical_retries = technical_retries
         self.deadline = deadline
@@ -73,9 +75,15 @@ class StructuredLlm:
         # per ruolo: chiamate (tentativi), secondi totali, tentativi falliti
         self.stats: dict[str, dict[str, float]] = {}
 
-    def _record(self, role: str, seconds: float, failed: bool) -> None:
-        s = self.stats.setdefault(role, {"calls": 0, "seconds": 0.0, "failures": 0})
+    def _journal(self, key: str | None, raw: str, request: LlmRequest) -> None:
+        if self.journal is not None and key is not None:
+            self.journal.put(key, raw, {"role": request.role.value, "task": request.task,
+                                        "fragment": request.context.get("fragment") or request.context.get("ruleId")})
+
+    def _record(self, role: str, seconds: float, failed: bool, prompt_tokens: int = 0) -> None:
+        s = self.stats.setdefault(role, {"calls": 0, "seconds": 0.0, "failures": 0, "promptTokens": 0})
         s["calls"] += 1
+        s["promptTokens"] += prompt_tokens  # stima: caratteri / 4 (system + user)
         s["seconds"] = round(s["seconds"] + seconds, 3)
         s["failures"] += int(failed)
 
@@ -84,6 +92,22 @@ class StructuredLlm:
         """`check` (opzionale) verifica vincoli deterministici oltre allo schema: se solleva ValueError il
         tentativo conta come non conforme e il messaggio torna al modello, come per gli errori di schema."""
         schema = llm_json_schema(response_model)
+        journal_key = None
+        if self.journal is not None:
+            journal_key = self.journal.key({"role": request.role.value, "task": request.task, "system": request.system,
+                                            "user": request.user, "model": self.provider.model_for(request.role),
+                                            "schema": response_model.__name__})
+            cached = self.journal.get(journal_key)
+            if cached is not None:
+                try:
+                    result = response_model.model_validate_json(extract_json(cached))
+                    if check is not None:
+                        check(result)
+                    self.journal.replayed += 1
+                    log.debug("[CHECKPOINT] %s/%s servita dal checkpoint", request.role.value, request.task)
+                    return result
+                except (ValidationError, json.JSONDecodeError, ValueError):
+                    pass  # voce non più valida: si richiama il modello
         attempts = self.technical_retries + 1
         last_error = ""
         current = request
@@ -113,7 +137,8 @@ class StructuredLlm:
                 log.warning("[LLM] %s: %s (tentativo %d/%d)", request.task, last_error, attempt, attempts)
                 continue
             elapsed = time.monotonic() - started
-            self._record(request.role.value, elapsed, failed=False)
+            self._record(request.role.value, elapsed, failed=False,
+                         prompt_tokens=(len(current.system) + len(current.user)) // 4)
             log.info("[LLM] %s/%s %s: %.1fs", request.role.value, request.task,
                      request.context.get("fragment") or request.context.get("ruleId") or "", elapsed)
             log.debug("[LLM] <- %s/%s risposta:\n%s", request.role.value, request.task, raw)
@@ -133,9 +158,11 @@ class StructuredLlm:
                 )
                 continue
             if check is None:
+                self._journal(journal_key, raw, request)
                 return result
             try:
                 check(result)
+                self._journal(journal_key, raw, request)
                 return result
             except ValueError as exc:
                 last_error = f"output non conforme ai vincoli: {exc}"

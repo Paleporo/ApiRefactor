@@ -25,7 +25,7 @@ from app.model.refs import RefIndex
 from app.prompts import load_prompt
 from app.refactor.fragments import Fragment, build_slice, fragment_content, render
 from app.refactor.operations import AppliedChange
-from app.refactor.planner import describe_rule
+from app.refactor.planner import describe_rule, rules_for
 from app.rules.models import SpectralRule
 from app.rules.registry import RuleRegistry
 
@@ -112,6 +112,8 @@ class CriticReport(BaseModel):
     issues: list[ReviewedIssue] = Field(default_factory=list)
     skipped: bool = False
     skip_reason: str | None = Field(None, alias="skipReason")
+    # frammenti cambiati ma non rivisti, con il motivo (es. solo correzioni deterministiche)
+    skipped_fragments: dict[str, str] = Field(default_factory=dict, alias="skippedFragments")
 
     @classmethod
     def skipped_for(cls, iteration: int, reason: str) -> "CriticReport":
@@ -125,6 +127,7 @@ class CriticReport(BaseModel):
     def dump(self) -> dict[str, Any]:
         return {"iteration": self.iteration, "accepted": self.accepted, "skipped": self.skipped,
                 "skipReason": self.skip_reason, "reviewedFragments": self.reviewed_fragments,
+                "skippedFragments": self.skipped_fragments,
                 "failedFragments": self.failed_fragments, "modelAccepted": self.model_accepted,
                 "issues": [i.dump() for i in self.issues]}
 
@@ -219,8 +222,11 @@ class CriticEngine:
                                       for c in applied if any(inside(loc) for loc in c.locations)],
                 "semanticDiff": [c.dump() for c in diff if inside(c.location)],
                 "validation": [v.dump() for v in validation + governance if inside(v.path)],
-                "rules": [describe_rule(r) for r in self.registry.for_fragment(fragment.kind, fragment.method,
-                                                                               fragment.path)],
+                "rules": [describe_rule(r) for r in rules_for(
+                    self.registry,
+                    [v.rule_id for v in validation + governance if inside(v.path)]
+                    + [c.rule_id for c in applied if any(inside(loc) for loc in c.locations)],
+                    fragment, include_judgment=True)],
             }
             request = LlmRequest(role=AgentRole.CRITIC, task="critic-fragment", system=self.system,
                                  user="## Review input\n" + render(payload) + "\n\nReturn your verdict (JSON).",

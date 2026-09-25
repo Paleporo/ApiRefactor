@@ -119,7 +119,7 @@ class RuleRegistry:
 
 
 # ── conflitti tra regole ──────────────────────────────────────────────
-def _spectral_casing(rule: SpectralRule) -> tuple[NameTarget, Casing] | None:
+def spectral_casing(rule: SpectralRule) -> tuple[NameTarget, Casing] | None:
     """Vincolo di naming espresso da una regola Spectral, se riconoscibile."""
     given = rule.given.replace(" ", "")
     if rule.function == "casing" and rule.function_options:
@@ -144,7 +144,7 @@ def _spectral_casing(rule: SpectralRule) -> tuple[NameTarget, Casing] | None:
 def detect_conflicts(compiled: list[CompiledRule], spectral: list[SpectralRule]) -> list[RuleConflict]:
     """Stesso elemento, indicazioni diverse: vince la regola deterministica (Spectral). Il conflitto è sempre riportato."""
     conflicts: list[RuleConflict] = []
-    mechanical = {c[0]: (r, c[1]) for r in spectral if (c := _spectral_casing(r))}
+    mechanical = {c[0]: (r, c[1]) for r in spectral if (c := spectral_casing(r))}
     casing_rules: dict[NameTarget, list[tuple[CompiledRule, Casing]]] = {}
     for rule in compiled:
         for req in rule.requirements:

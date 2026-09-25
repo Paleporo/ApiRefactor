@@ -3,6 +3,8 @@
 
 targetOpenApiVersion: "3.0"        # "3.0" | "3.1"
 maxIterations: 3                   # iterazioni massime del feedback loop
+apiLifecycle: "published"          # "draft": API non ancora pubblicata, le modifiche breaking sono ammesse
+                                   # (restano elencate in breakingChanges, ma lo stato è SUCCESS)
 
 refactorModel: "qwen3-coder:30b"   # Refactor Agent + Correction Engine + Rule Interpreter
 criticModel: "qwen3-coder:30b"     # Critic Agent (ruolo separato)

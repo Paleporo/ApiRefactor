@@ -206,14 +206,15 @@ async def test_case_005_persistent_regression_needs_review(config, agents, rules
     assert any("nessun candidato migliora la baseline" in r for r in result.reasons)
 
 
-async def test_case_005_false_critic_claim_is_refuted(config, agents, rules_dir, tmp_path):
-    """Un claim fattuale falso del Critic viene smentito dal diff e non blocca."""
+async def test_false_critic_claim_is_refuted(config, agents, rules_dir, tmp_path):
+    """Un claim fattuale falso del Critic viene smentito dal diff e non blocca (caso 001: SEC-001 corretta
+    dall'LLM, quindi i frammenti delle operation vengono rivisti)."""
+    claimed = "/paths/~1wallets/get/responses/400"
     agents.critic = lambda r: {"accepted": False, "issues": [{
-        "type": "ELEMENT_LOST", "severity": "ERROR", "location": "/paths/~1cards/post/responses/400",
-        "message": "La response 400 è stata rimossa", "claim": {"kind": "REMOVED",
-                                                                 "location": "/paths/~1cards/post/responses/400"}}]}
-    result, _ = await run_case(config, agents, rules_dir, "case-005-regression-guard.yaml", tmp_path)
+        "type": "ELEMENT_LOST", "severity": "ERROR", "location": claimed,
+        "message": "La response 400 è stata rimossa", "claim": {"kind": "REMOVED", "location": claimed}}]}
+    result, _ = await run_case(config, agents, rules_dir, "case-001-swagger2-legacy.yaml", tmp_path)
 
     issues = result.iterations[0].critic.issues
-    assert issues and issues[0].verification == "REFUTED" and not issues[0].blocking
-    assert result.status == RunStatus.SUCCESS, result.reasons
+    assert issues and all(i.verification == "REFUTED" and not i.blocking for i in issues)
+    assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons

@@ -17,6 +17,8 @@ class AppConfig(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
 
     target_openapi_version: Literal["3.0", "3.1"] = Field("3.0", alias="targetOpenApiVersion")
+    # draft: API non ancora pubblicata, le modifiche breaking sono il lavoro richiesto (stato SUCCESS)
+    api_lifecycle: Literal["draft", "published"] = Field("published", alias="apiLifecycle")
     max_iterations: int = Field(3, alias="maxIterations", ge=1)
     refactor_model: str = Field("qwen3-coder:30b", alias="refactorModel")
     critic_model: str = Field("deepseek-r1:14b", alias="criticModel")

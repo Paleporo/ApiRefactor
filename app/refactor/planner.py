@@ -42,6 +42,14 @@ _PHASE = {
 }
 
 
+def _phase(op) -> float:
+    # un path parameter rinominato cambia la chiave del path: va dopo le operazioni che usano il vecchio path
+    # (comprese le rinomine di query/header), e prima di RENAME_PATH
+    if op.type == "RENAME_PARAMETER" and op.in_ == "path":
+        return 8.5
+    return _PHASE.get(op.type, 5)
+
+
 class PlanIssue(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     kind: str  # RULE_WITHOUT_VIOLATION | SET_FIELD_UNJUSTIFIED | TARGET_NORMALIZED | CONFLICT | LLM_FAILED
@@ -79,6 +87,24 @@ def describe_rule(rule) -> dict[str, Any]:
         "requirements": [r.model_dump(by_alias=True, mode="json") for r in rule.requirements],
         **({"overriddenBy": rule.overridden_by} if rule.overridden_by else {}),
     }
+
+
+def rules_for(registry: RuleRegistry, rule_ids: list[str], fragment: Fragment | None = None,
+              include_judgment: bool = False) -> list:
+    """Regole da mostrare all'LLM: solo quelle citate (violazioni/problemi/modifiche del frammento), più le regole
+    di giudizio applicabili se richiesto (Critic). Non l'intero corpus applicabile: era ~80% del prompt."""
+    out, seen = [], set()
+    for rid in rule_ids:
+        rule = registry.get(rid)
+        if rule is not None and rid not in seen:
+            seen.add(rid)
+            out.append(rule)
+    if include_judgment and fragment is not None:
+        for rule in registry.for_fragment(fragment.kind, fragment.method, fragment.path):
+            if isinstance(rule, CompiledRule) and rule.judgment_only and rule.id not in seen:
+                seen.add(rule.id)
+                out.append(rule)
+    return out
 
 
 def _op_key(op) -> tuple:
@@ -199,7 +225,7 @@ class PlanValidator:
 
         # 3) rename che produrrebbero duplicati (verso nomi esistenti o due rename verso lo stesso nome)
         survivors = self._check_rename_targets(doc, survivors, issues)
-        survivors.sort(key=lambda p: _PHASE.get(p.operation.type, 5))
+        survivors.sort(key=lambda p: _phase(p.operation))
         return survivors, issues
 
     @staticmethod
@@ -241,7 +267,7 @@ class RefactoringPlanner:
 
     async def propose_for_fragment(self, doc: SpecDocument, refs: RefIndex, fragment: Fragment,
                                    violations: list[Violation]) -> ops.OperationsProposal:
-        rules = self.registry.for_fragment(fragment.kind, fragment.method, fragment.path)
+        rules = rules_for(self.registry, [v.rule_id for v in violations])
         slice_ = build_slice(doc, fragment, refs, self.budget_tokens)
         user = (
             "## Fragment\n" + render(slice_)

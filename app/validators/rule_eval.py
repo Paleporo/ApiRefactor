@@ -121,11 +121,17 @@ class RuleEvaluator:
             yield from self._property_names(self.doc.data, "")
         elif target in (NameTarget.QUERY_PARAMETER, NameTarget.HEADER):
             where = "query" if target == NameTarget.QUERY_PARAMETER else "header"
+            seen_paths: set[str] = set()
             for op in self._operations(rule):
-                for idx, p in enumerate((self.doc.get(op.pointer) or {}).get("parameters") or []):
-                    p = self.refs.resolve_ref(p)
-                    if isinstance(p, dict) and p.get("in") == where:
-                        yield jp.child(op.pointer, "parameters", idx, "name"), str(p.get("name"))
+                holders = [op.pointer]
+                if op.path not in seen_paths:  # parametri a livello di path: una volta sola per path
+                    seen_paths.add(op.path)
+                    holders.insert(0, jp.join(["paths", op.path]))
+                for holder in holders:
+                    for idx, p in enumerate((self.doc.get(holder) or {}).get("parameters") or []):
+                        p = self.refs.resolve_ref(p)
+                        if isinstance(p, dict) and p.get("in") == where:
+                            yield jp.child(holder, "parameters", idx, "name"), str(p.get("name"))
         elif target == NameTarget.PATH_SEGMENT:
             for path in self.doc.paths():
                 for seg in path.strip("/").split("/"):

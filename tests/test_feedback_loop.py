@@ -168,36 +168,48 @@ def test_ambiguous_or_missing_target_is_not_guessed():
 
 
 # ── 4-7. pipeline ────────────────────────────────────────────────────────
+WALLETS_POST = "/paths/~1wallets/post"
+
+
+def accounts_with_api_key(tmp_path):
+    """Caso 003 con la security globale su apiKey: SEC-001 (bearer) non è correggibile meccanicamente."""
+    spec = load("case-003-no-problem-details.yaml")
+    spec["components"]["securitySchemes"] = {"apiKeyAuth": {"type": "apiKey", "in": "header", "name": "X-Api-Key"}}
+    spec["security"] = [{"apiKeyAuth": []}]
+    spec_file = tmp_path / "accounts.yaml"
+    spec_file.write_text(yaml.safe_dump(spec, sort_keys=False))
+    return spec_file
+
+
 @pytest.mark.needs_node
 async def test_case_003_error_format_fixed_deterministically_despite_a_misbehaving_llm(config, agents, rules_dir,
                                                                                       tmp_path):
-    """Una violazione per l'LLM (snake_case) e un LLM che propone anche operazioni sbagliate."""
-    spec = load("case-003-no-problem-details.yaml")
-    spec["components"]["schemas"]["Account"]["properties"]["holder_name"] = \
-        spec["components"]["schemas"]["Account"]["properties"].pop("holderName")
-    spec_file = tmp_path / "accounts.yaml"
-    spec_file.write_text(yaml.safe_dump(spec, sort_keys=False))
+    """L'LLM riceve solo SEC-001 e propone anche operazioni sbagliate: scartate; gli errori sono convertiti in
+    modo deterministico. Il Critic rivede solo i frammenti con modifiche dell'LLM."""
     content = {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorMessage"}}}
 
     def misbehaving_refactor(request):
-        ops = [  # tutte con ruleId senza violazioni nel frammento, o target non escapati: da scartare
+        fragment = request.context["fragment"]
+        ops = [  # ruleId senza violazioni nel frammento (OPID-001) o violazioni non mostrate all'LLM: da scartare
             {"type": "ADD_SECURITY_SCHEME", "name": "extraAuth", "scheme": {"type": "http", "scheme": "basic"},
-             "ruleId": "SEC-001"},
-            {"type": "REPLACE_RESPONSE_SCHEMA", "target": "/paths/~1accounts/get/responses/400",
-             "mediaType": "application/json", "schema": {"type": "object"}, "ruleId": "DE-STATUS-002-problem-json-errors"},
+             "ruleId": "OPID-001"},
+            {"type": "REPLACE_RESPONSE_SCHEMA", "target": fragment + "/responses/400", "mediaType": "application/json",
+             "schema": {"type": "object"}, "ruleId": "DE-STATUS-002-problem-json-errors"},
             {"type": "SET_FIELD", "target": R400 + "/content", "value": content, "ruleId": "ERR-001"},
         ]
         for v in request.context["violations"]:
-            if v["path"].endswith("/holder_name"):
-                ops.append({"type": "RENAME_PROPERTY", "target": "/components/schemas/Account", "from": "holder_name",
-                            "to": "holderName", "ruleId": v["ruleId"]})
+            if v["ruleId"] == "SEC-001":
+                ops += [{"type": "ADD_SECURITY_SCHEME", "name": "bearerAuth", "ruleId": "SEC-001",
+                         "scheme": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
+                        {"type": "SET_SECURITY_REQUIREMENT", "target": fragment, "requirements": [{"bearerAuth": []}],
+                         "ruleId": "SEC-001"}]
         return {"operations": ops, "rationale": "misbehaving"}
 
     agents.refactor = misbehaving_refactor
     provider = agents.provider()
-    result = await RefactorPipeline(config, provider, rules_dir).run(spec_file)
+    result = await RefactorPipeline(config, provider, rules_dir).run(accounts_with_api_key(tmp_path))
 
-    # rename della proprietà e conversione degli errori: breaking attesi
+    # errori convertiti e security cambiata da apiKey a bearer: breaking attesi
     assert result.status == RunStatus.SUCCESS_WITH_BREAKING_CHANGES, result.reasons
     for ptr in (R400, "/paths/~1accounts~1{account-id}/get/responses/404"):
         assert jp.resolve(result.final.data, ptr)["content"] == {
@@ -206,11 +218,30 @@ async def test_case_003_error_format_fixed_deterministically_despite_a_misbehavi
     plan = result.plans[0]
     assert {p.operation.type for p in plan.operations if p.proposed_by == "deterministic"} == {
         "ADD_COMPONENT", "CONVERT_ERROR_RESPONSE"}
-    assert sum(1 for i in plan.issues if i.kind == "RULE_WITHOUT_VIOLATION") == 3
-    # l'LLM non ha ricevuto le violazioni errorFormat né quelle Spectral sulle stesse response
-    sent = [v["ruleId"] for r in provider.requests if r.role == AgentRole.REFACTOR for v in r.context["violations"]]
-    assert sent and not {"ERR-001", "DE-STATUS-002-problem-json-errors"} & set(sent)
+    assert sum(1 for i in plan.issues if i.kind == "RULE_WITHOUT_VIOLATION") == 6  # 3 per frammento
+    sent = {v["ruleId"] for r in provider.requests if r.role == AgentRole.REFACTOR for v in r.context["violations"]}
+    assert sent == {"SEC-001"}
     assert not [v for v in result.final_governance if v.rule_id in ("ERR-001", "DE-STATUS-002-problem-json-errors")]
+    # Critic: solo i frammenti con modifiche dell'LLM; lo schema Problem (solo deterministico) viene saltato
+    critic = result.iterations[0].critic
+    assert set(critic.reviewed_fragments) >= {"/paths/~1accounts/get", "/paths/~1accounts~1{account-id}/get"}
+    assert "/components/schemas/Problem" not in critic.reviewed_fragments
+    assert "deterministiche" in critic.skipped_fragments["/components/schemas/Problem"]
+
+
+@pytest.mark.needs_node
+async def test_critic_not_invoked_on_fragments_changed_only_deterministically(config, agents, rules_dir, tmp_path):
+    provider = agents.provider()
+    result = await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-003-no-problem-details.yaml")
+    out = OutputWriter(tmp_path / "output").write(result)
+
+    assert not [r for r in provider.requests if r.role in (AgentRole.REFACTOR, AgentRole.CRITIC)]
+    critic = result.iterations[0].critic
+    assert critic.accepted and not critic.skipped and critic.reviewed_fragments == []
+    assert set(critic.skipped_fragments) == {"/paths/~1accounts/get", "/paths/~1accounts~1{account-id}/get",
+                                             "/components/schemas/Problem"}
+    report = json.loads((out / "reports" / "critic-report.json").read_text())
+    assert report["iterations"][0]["skippedFragments"] == critic.skipped_fragments
 
 
 @pytest.mark.needs_node
@@ -218,7 +249,7 @@ async def test_critic_not_invoked_on_candidates_with_governance_errors(config, a
     agents.refactor = lambda r: {"operations": [], "rationale": "nothing"}
     agents.correction = lambda r: {"operations": [], "rationale": "nothing"}
     provider = agents.provider()
-    result = await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-002-naming.yaml")
+    result = await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-001-swagger2-legacy.yaml")
     out = OutputWriter(tmp_path / "output").write(result)
 
     assert not [r for r in provider.requests if r.role == AgentRole.CRITIC]
@@ -229,54 +260,61 @@ async def test_critic_not_invoked_on_candidates_with_governance_errors(config, a
     assert result.output_is_baseline  # nessun candidato ha migliorato la baseline
 
 
+def worsening_header_rename(request):
+    """Correzione che rinomina l'header Idempotency-Key in un nome non Train-Case: violazione nuova."""
+    problems = [p for p in request.context["problems"]
+                if p["rule_id"] == "SEC-001" and p["location"] == WALLETS_POST]
+    return {"operations": [{"type": "SET_FIELD", "target": WALLETS_POST + "/parameters/0/name",
+                            "value": "idempotency_key", "ruleId": "SEC-001"}] if problems else [],
+            "rationale": "worse"}
+
+
 @pytest.mark.needs_node
 async def test_worsening_correction_is_rejected_and_output_is_best_candidate(config, agents, rules_dir, tmp_path):
-    def partial_refactor(request):  # V1 migliora: corregge solo amount_value
-        ops = [{"type": "RENAME_PROPERTY", "target": "/components/schemas/payment_order", "from": "amount_value",
-                "to": "amountValue", "ruleId": v["ruleId"]}
-               for v in request.context["violations"] if v["path"].endswith("/amount_value")]
-        return {"operations": ops[:1], "rationale": "partial"}
+    def partial_refactor(request):  # V1 migliora: corregge SEC-001 solo su GET /wallets
+        if request.context["fragment"] != "/paths/~1wallets/get":
+            return {"operations": [], "rationale": "skip"}
+        return {"operations": [
+            {"type": "ADD_SECURITY_SCHEME", "name": "bearerAuth", "ruleId": "SEC-001",
+             "scheme": {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"}},
+            {"type": "SET_SECURITY_REQUIREMENT", "target": "/paths/~1wallets/get", "requirements": [{"bearerAuth": []}],
+             "ruleId": "SEC-001"}], "rationale": "partial"}
 
-    def worsening_correction(request):  # aggiunge una proprietà non conforme: +2 ERROR
-        rule = next((p["rule_id"] for p in request.context["problems"] if p["rule_id"].startswith("DE-JSON-001")), None)
-        ops = [] if rule is None else [{"type": "SET_FIELD", "ruleId": rule, "value": {"type": "string"},
-                                        "target": "/components/schemas/payment_order/properties/bad_prop"}]
-        return {"operations": ops, "rationale": "worse"}
-
-    agents.refactor, agents.correction = partial_refactor, worsening_correction
+    agents.refactor, agents.correction = partial_refactor, worsening_header_rename
     provider = agents.provider()
-    result = await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-002-naming.yaml")
+    result = await RefactorPipeline(config, provider, rules_dir).run(APIS / "case-001-swagger2-legacy.yaml")
     out = OutputWriter(tmp_path / "output").write(result)
 
     rejected = [it for it in result.iterations if it.rejected]
     assert [it.iteration for it in rejected] == [2, 3]
-    assert any("ERROR da" in r for r in rejected[0].rejection_reasons)
-    assert all(v.path.endswith("/bad_prop") for v in rejected[0].new_violations)
+    assert any("violazioni nuove" in r for r in rejected[0].rejection_reasons)
+    # rinominare l'header introduce più violazioni: casing, header richiesto mancante, change non tracciati
+    assert {"DE-HDR-001-header-case", "HTTP-IDEMPOTENCY-001", "DIFF-UNTRACED-CHANGE"} <= \
+        {v.rule_id for v in rejected[0].new_violations}
     # output = miglior candidato (V1), non l'ultimo scartato; mai peggiore della baseline
     assert result.final_iteration == 1 and not result.output_is_baseline
-    props = result.final.data["components"]["schemas"]["payment_order"]["properties"]
-    assert "amountValue" in props and "bad_prop" not in props
+    params = result.final.data["paths"]["/wallets"]["post"]["parameters"]
+    assert params[0]["name"] == "Idempotency-Key"
     assert result.final_counts["errors"] < result.baseline_counts["errors"]
     # la seconda correzione riceve il tentativo scartato, per non ripeterlo
     corrections = [r for r in provider.requests if r.role == AgentRole.CORRECTION]
-    assert "previousAttemptRejected" not in corrections[0].user and "previousAttemptRejected" in corrections[1].user
+    first_round = [r for r in corrections if r.context["iteration"] == 2]
+    second_round = [r for r in corrections if r.context["iteration"] == 3]
+    assert all("previousAttemptRejected" not in r.user for r in first_round)
+    assert second_round and all("previousAttemptRejected" in r.user for r in second_round)
     summary = json.loads((out / "reports" / "summary.json").read_text())
     assert [r["iteration"] for r in summary["rejectedIterations"]] == [2, 3]
     assert summary["output"] == {"iteration": 1, "isBaseline": False, "note": None}
     changes = json.loads((out / "reports" / "changes.json").read_text())
-    assert changes["rejected"] and all("bad_prop" in c["description"] or "bad_prop" in json.dumps(c["locations"])
-                                       for c in changes["rejected"])
+    assert changes["rejected"] and all("parameters/0/name" in json.dumps(c) for c in changes["rejected"])
     assert all(c["inFinalOutput"] for c in changes["applied"])
 
 
 @pytest.mark.needs_node
 async def test_no_candidate_better_than_baseline_outputs_the_original(config, agents, rules_dir, tmp_path):
     agents.refactor = lambda r: {"operations": [], "rationale": "nothing"}
-    agents.correction = lambda r: {"operations": [
-        {"type": "SET_FIELD", "ruleId": p["rule_id"], "value": {"type": "string"},
-         "target": "/components/schemas/payment_order/properties/other_bad"}
-        for p in r.context["problems"] if p["rule_id"].startswith("DE-JSON-001")][:1], "rationale": "worse"}
-    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-002-naming.yaml")
+    agents.correction = worsening_header_rename
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-001-swagger2-legacy.yaml")
     out = OutputWriter(tmp_path / "output").write(result)
 
     assert result.output_is_baseline and result.final.data == result.baseline.data
@@ -284,13 +322,13 @@ async def test_no_candidate_better_than_baseline_outputs_the_original(config, ag
     summary = json.loads((out / "reports" / "summary.json").read_text())
     assert summary["output"]["isBaseline"] is True
     assert "nessun candidato migliora la baseline" in summary["output"]["note"]
-    assert (out / "refactored" / "case-002-naming.yaml").read_text() == yaml.safe_dump(
+    assert (out / "refactored" / "case-001-swagger2-legacy.yaml").read_text() == yaml.safe_dump(
         result.baseline.data, sort_keys=False, allow_unicode=True, width=120)
 
 
 @pytest.mark.needs_node
 async def test_summary_reports_phase_timings_and_llm_calls_per_role(config, agents, rules_dir, tmp_path):
-    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-002-naming.yaml")
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(APIS / "case-001-swagger2-legacy.yaml")
     summary = json.loads((OutputWriter(tmp_path / "output").write(result) / "reports" / "summary.json").read_text())
     assert set(PHASES) | {"total"} <= set(summary["timings"])
     assert all(isinstance(v, float) and v >= 0 for v in summary["timings"].values())

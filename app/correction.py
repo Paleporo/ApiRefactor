@@ -19,7 +19,7 @@ from app.model.refs import RefIndex
 from app.prompts import load_prompt
 from app.refactor import operations as ops
 from app.refactor.fragments import Fragment, build_slice, fragment_content, render
-from app.refactor.planner import PlanIssue, PlanValidator, RefactoringPlan, describe_rule
+from app.refactor.planner import PlanIssue, PlanValidator, RefactoringPlan, describe_rule, rules_for
 from app.rules.registry import RuleRegistry
 
 log = get_logger("correction")
@@ -66,8 +66,7 @@ class CorrectionEngine:
                 "alreadyApplied": [c.model_dump(by_alias=True, mode="json", include={"type", "rule_id", "description"})
                                    for c in applied if any(ptr and jp.is_prefix(ptr, loc) for loc in c.locations)],
                 "problems": [p.model_dump(mode="json") for p in problems],
-                "rules": [describe_rule(r) for r in self.registry.for_fragment(fragment.kind, fragment.method,
-                                                                               fragment.path)],
+                "rules": [describe_rule(r) for r in rules_for(self.registry, [p.rule_id for p in problems])],
             }
             if previous_rejection:
                 payload["previousAttemptRejected"] = previous_rejection

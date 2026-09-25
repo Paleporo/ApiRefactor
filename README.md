@@ -142,6 +142,8 @@ Opzioni utili (ognuna sovrascrive il valore di `config.yaml` solo per quella run
 | `--run-timeout SECONDI` | budget complessivo della run |
 | `--refactor-model`, `--critic-model`, `--ollama-host` | override dei modelli e dell'host |
 | `--config path/config.yaml` | file di configurazione alternativo |
+| `--api-lifecycle draft\|published` | override di `apiLifecycle` |
+| `--resume` | riprende una run interrotta dall'ultimo checkpoint (`output/<api-name>/.checkpoint/`) |
 
 Altri comandi:
 
@@ -184,7 +186,10 @@ output/<api-name>/
                                      nota); `baselineCounts` / `finalCounts` (ERROR, WARNING); condizioni di
                                      uscita e iterazioni scartate (`rejectedIterations`); `compileFailedRules`;
                                      `timings` per fase (compile, plan, engine, validation, critic,
-                                     correction, total) e `llmByRole` (chiamate, secondi, fallimenti)
+                                     correction, total) e `llmByRole` (chiamate, secondi, fallimenti,
+                                     token stimati inviati); `apiLifecycle`; `resume` (ripresa e risposte
+                                     LLM riutilizzate dal checkpoint)
+    .checkpoint/                     giornale delle risposte LLM per `--resume` (run.json + llm-journal.jsonl)
 ```
 
 Stato finale:
@@ -312,9 +317,10 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   | `requireQueryParameter` | `ADD_QUERY_PARAMETER` |
   | `requireResponse` | `ADD_RESPONSE` |
   | `requireSecurity` (http) | `ADD_SECURITY_SCHEME` (se manca) + `SET_SECURITY_REQUIREMENT` |
+  | `nameCasing` e regole Spectral di casing | `RENAME_PROPERTY`, `RENAME_PARAMETER`, `RENAME_PATH`, `RENAME_SCHEMA`, `ADD_OPERATION_ID` |
 
-  Il Refactor Agent e il Correction Engine ricevono solo il resto: `nameCasing`, violazioni Spectral e del
-  validator senza mapping. Non ricevono nemmeno le violazioni che cadono su una response già riscritta da una
+  Il Refactor Agent e il Correction Engine ricevono solo il resto: violazioni Spectral e del validator senza
+  mapping, e le rinomine in collisione. Non ricevono nemmeno le violazioni che cadono su una response già riscritta da una
   correzione deterministica, per esempio DE-STATUS-002 sulla stessa response di ERR-001, che altrimenti
   porterebbero a modifiche concorrenti. Restano all'LLM, per scelta, i casi in cui la correzione non è
   deducibile:
@@ -331,6 +337,40 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
     `Problem`, oppure `ProblemDetails` se esiste già un `Problem` non conforme;
   - **nome del security scheme:** quello di uno scheme conforme già definito, altrimenti `<scheme>Auth`;
   - **header e query parameter aggiunti:** schema `{"type": "string"}`.
+- **Naming deterministico.** Si correggono in modo deterministico le violazioni `nameCasing` e quelle delle
+  regole Spectral di casing: proprietà, parametri (query, header, path), segmenti di path, nomi di schema e
+  operationId. Il casing di destinazione delle regole Spectral viene dedotto dal ruleset (funzioni `casing`,
+  `kebabCasePath`, pattern Train-Case degli header): nessun ruleId è scritto nel codice.
+  - **Conversione** (`app/validators/casing.py`): il nome viene scomposto in parole e ricomposto.
+
+    | Nome | Casing | Risultato |
+    | --- | --- | --- |
+    | `payer_IBAN` | camel | `payerIban` (separatori misti, acronimo) |
+    | `IBANCode` / `HTTPStatusCode` | camel | `ibanCode` / `httpStatusCode` (acronimo seguito da parola) |
+    | `sha256_hash` / `line_2` | camel | `sha256Hash` / `line2` (le cifre restano con la parola precedente) |
+    | `Payment_Instructions` / `v2Accounts` | kebab | `payment-instructions` / `v2-accounts` |
+    | `x_request_id` | Train | `X-Request-Id` |
+    | `payment_order` | Pascal | `PaymentOrder` |
+    | `2fa_code` | camel | nessuna rinomina: `2faCode` non è camelCase valido → all'LLM |
+
+  - **Riferimenti aggiornati** (`app/refactor/references.py`):
+    - schema: `$ref` e `discriminator.mapping`, nella forma `$ref` o come nome semplice;
+    - proprietà: `required`, `example`/`examples` dello schema e dei media type che lo usano (anche come
+      `items` di un array), `discriminator.propertyName`;
+    - parametro: template del path, `links` che puntano all'operation (chiavi `nome` e `<in>.nome`),
+      espressioni `$request.<in>.<nome>`;
+    - path e operationId: `links.operationRef` e `links.operationId`.
+
+    Non vengono aggiornati il `required` di schemi che includono lo schema via `allOf` e gli esempi annidati
+    oltre il primo livello.
+  - **Collisioni:** se il nuovo nome esiste già, o se due nomi dello stesso ambito diventerebbero uguali (per
+    esempio `tax_amount` e `tax__amount`), non si rinomina nulla e la violazione passa all'LLM.
+  - **Parametri via `$ref`:** i parametri definiti in `components/parameters` non vengono rinominati in modo
+    deterministico, perché il componente è condiviso.
+  - **Tracciabilità:** le rinomine sono tracciate con il loro `ruleId` e, quando cambiano il wire, sono
+    SEMANTIC e breaking.
+  - **Path parameter:** una rinomina cambia la chiave del path, quindi nel piano viene eseguita dopo le altre
+    operazioni sullo stesso path e prima di `RENAME_PATH`.
 - **Validazione del piano.**
   - Un'operazione proposta dall'LLM deve citare il `ruleId` di una violazione mostrata per il suo frammento
     di origine; altrimenti viene scartata e riportata (`RULE_WITHOUT_VIOLATION`). Niente modifiche "per
@@ -347,6 +387,11 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
   dei puntatori, e ho scelto di non introdurli: `CONVERT_ERROR_RESPONSE` ora è deterministica, quindi l'LLM
   punta raramente alle response; la normalizzazione copre l'errore osservato; e una seconda forma di target
   renderebbe più grande lo schema delle operazioni da generare, cosa che su CPU pesa.
+- **Critic solo sulle modifiche dell'LLM.** Il Critic rivede un frammento solo se contiene almeno una
+  modifica proposta dall'LLM (Refactor Agent o Correction Engine), o un change non tracciato del semantic
+  diff, cioè una possibile regressione. Un frammento modificato solo da correzioni deterministiche è già
+  coperto da validatori e semantic diff: viene saltato e `critic-report.json` lo elenca in
+  `skippedFragments` con il motivo. Ogni `AppliedChange` riporta in `proposedBy` chi l'ha proposto.
 - **Critic solo quando serve.** Il Critic viene invocato solo su candidati OpenAPI validi e senza ERROR del
   GovernanceValidator; altrimenti si passa direttamente alla correzione, e `critic-report.json` riporta
   `skipped` con il motivo. Gli ERROR del semantic diff (`DIFF-UNTRACED-CHANGE`) non escludono il Critic,
@@ -368,9 +413,15 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
 
 ### Context slicing
 
-- Il documento viene lavorato per frammenti (livello documento, path, operation, componente). A ogni
-  chiamata si passano solo il frammento, le regole applicabili (query per scope e metodo) e le violazioni di
-  quel frammento.
+- Il documento viene lavorato per frammenti (livello documento, path, operation, componente). Un frammento
+  di operation contiene solo quell'operation, non l'intero path item, più il contesto minimo: i parametri
+  a livello di path e gli schemi referenziati.
+- Al Refactor Agent e al Correction Engine arrivano solo le regole citate dalle violazioni del frammento; al
+  Critic, le regole di giudizio applicabili e quelle coinvolte nel frammento. Prima arrivavano tutte le
+  regole applicabili, circa l'80% del prompt. Riduzione misurata sui prompt di pianificazione (frammenti con
+  violazioni dei casi in `apis/` e della spec di test del ruleset): da 25.528 a 14.607 token stimati, −43%
+  (da −32% a −57% per spec). `llmByRole.promptTokens` in `summary.json` misura i token inviati nelle run
+  reali.
 - I `$ref` sono indicizzati una volta sola (`RefIndex`). Al modello arrivano solo le definizioni referenziate
   direttamente, entro `llmContextTokenBudget`; le altre compaiono solo per nome. I cicli (`User → Manager →
   User`) vengono rilevati: la risoluzione si ferma sul ciclo, che è riportato come `OAS-REF-CIRCULAR` (INFO).
@@ -419,6 +470,14 @@ Ogni issue del Critic passa da una verifica deterministica prima di poter blocca
   timeout, errori di Ollama e output non conforme allo schema. In quest'ultimo caso l'errore di validazione
   viene passato al tentativo successivo. Esauriti i retry, il frammento è marcato come fallito e riportato,
   e la run non può chiudersi in SUCCESS.
+- **Ripresa** (`--resume`). Il checkpoint è il giornale delle risposte LLM riuscite, in
+  `output/<api-name>/.checkpoint/`, scritto con fsync dopo ogni frammento elaborato (pianificazione,
+  Critic, correzione, compilazione delle regole). A parità di risposte dell'LLM la pipeline è
+  deterministica, quindi la ripresa riesegue la run: le chiamate già fatte vengono servite dal giornale senza
+  interrogare il modello, e la run prosegue dal punto di interruzione. Validazione e Spectral si rieseguono,
+  ma costano secondi. La ripresa è rifiutata, con un messaggio che dice cosa è cambiato, se input, regole o
+  configurazione rilevante (modelli, target, iterazioni, lifecycle, …) non coincidono con la run interrotta.
+  Senza `--resume` il checkpoint viene ricreato da zero.
 - **Durata delle chiamate.** Ogni chiamata LLM viene cronometrata: una riga di log INFO per chiamata, e i
   totali per ruolo in `summary.json` (`llmByRole`).
 - **Ragionamento del Critic** (`criticThink`, default `false`). Il parametro `think` di Ollama viene passato
@@ -441,8 +500,9 @@ Tutti i parametri stanno in un solo file. I flag CLI li sovrascrivono solo per l
 | Chiave | Default | Descrizione |
 | --- | --- | --- |
 | `targetOpenApiVersion` | `"3.0"` | `"3.0"` o `"3.1"` |
+| `apiLifecycle` | `published` | `draft`: API non ancora pubblicata, le modifiche breaking sono il lavoro richiesto: restano in `breakingChanges`, ma lo stato è SUCCESS |
 | `maxIterations` | `3` | candidati valutati al massimo nel feedback loop |
-| `refactorModel` / `criticModel` | `qwen3-coder:30b` / `deepseek-r1:14b` | modelli Ollama per ruolo |
+| `refactorModel` / `criticModel` | `qwen3-coder:30b` / `qwen3-coder:30b` | modelli Ollama per ruolo (default del codice per il Critic: `deepseek-r1:14b`; `config.yaml` usa lo stesso modello per evitare di caricarne due in memoria su CPU) |
 | `criticThink` | `false` | ragionamento esteso del Critic (solo modelli con capability `thinking`) |
 | `ollamaHost` | `http://localhost:11434` | |
 | `llmCallTimeoutSeconds` | `600` | timeout della singola chiamata (su CPU serve un valore alto) |
@@ -547,6 +607,6 @@ nessun candidato migliora, tempi per fase e chiamate per ruolo in `summary.json`
 - I prompt e la pipeline sono testati end-to-end con l'LLM finto. Con modelli reali su CPU la qualità delle
   proposte dipende dal modello, ma la correttezza del risultato resta decisa dai validatori: nel caso
   peggiore la run chiude in NEEDS_REVIEW, mai in un falso SUCCESS.
-- Il Critic rivede solo i frammenti modificati. Una regola di giudizio non applicata a un frammento che il
-  refactoring non ha toccato non viene segnalata.
+- Il Critic rivede solo i frammenti con modifiche dell'LLM o con change non tracciati. Una regola di
+  giudizio non applicata a un frammento che l'LLM non ha toccato non viene segnalata.
 # ApiRefactor

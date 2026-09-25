@@ -14,6 +14,7 @@ from app.logging_setup import get_logger
 from app.model import pointer as jp
 from app.model.document import HTTP_METHODS, SpecDocument
 from app.refactor import operations as ops
+from app.refactor import references as refs
 from app.refactor.operations import AppliedChange, ApplyFailure, ChangeCategory
 
 log = get_logger("engine")
@@ -119,6 +120,7 @@ class RefactoringEngine:
                 log.debug("[ENGINE] %s (%s): nessun effetto (già conforme)", op.type, op.rule_id)
                 continue
             change.iteration = iteration
+            change.proposed_by = item.proposed_by
             if note:
                 change.description += f" ({note})"
             applied.append(change)
@@ -200,9 +202,11 @@ class RefactoringEngine:
         if before == op.operation_id:
             return None
         operation["operationId"] = op.operation_id
+        links = refs.rename_operation_id_refs(doc.data, before, op.operation_id) if before else 0
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.GOVERNANCE,
                              locations=[jp.child(op.target, "operationId")],
-                             description=f"operationId {before!r} -> {op.operation_id!r}", before=before,
+                             description=f"operationId {before!r} -> {op.operation_id!r}"
+                                         + (f" ({links} link aggiornati)" if links else ""), before=before,
                              after=op.operation_id)
 
     def _apply_rename_schema(self, doc: SpecDocument, op: ops.RenameSchema) -> AppliedChange | None:
@@ -225,26 +229,12 @@ class RefactoringEngine:
                 updated.append(at)
 
         _walk_refs(doc.data, "", fix)
-        self._fix_discriminator_mappings(doc.data, old_ref, new_ref)
+        refs.rename_schema_in_discriminators(doc.data, op.from_, op.to)
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.STRUCTURAL,
                              locations=[jp.join(["components", "schemas", op.from_]),
                                         jp.join(["components", "schemas", op.to])],
                              description=f"schema {op.from_} -> {op.to} ({len(updated)} $ref aggiornati)",
                              before=op.from_, after=op.to)
-
-    @staticmethod
-    def _fix_discriminator_mappings(node: Any, old_ref: str, new_ref: str) -> None:
-        if isinstance(node, dict):
-            mapping = (node.get("discriminator") or {}).get("mapping") if isinstance(node.get("discriminator"), dict) else None
-            if isinstance(mapping, dict):
-                for k, v in mapping.items():
-                    if v == old_ref:
-                        mapping[k] = new_ref
-            for v in node.values():
-                RefactoringEngine._fix_discriminator_mappings(v, old_ref, new_ref)
-        elif isinstance(node, list):
-            for v in node:
-                RefactoringEngine._fix_discriminator_mappings(v, old_ref, new_ref)
 
     def _apply_rename_property(self, doc: SpecDocument, op: ops.RenameProperty) -> AppliedChange | None:
         schema = _require(doc, op.target, "schema")
@@ -258,10 +248,12 @@ class RefactoringEngine:
         _rename_key(props, op.from_, op.to)
         if isinstance(schema.get("required"), list):
             schema["required"] = [op.to if r == op.from_ else r for r in schema["required"]]
+        extra = refs.rename_property_references(doc.data, op.target, op.from_, op.to)
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
                              locations=[jp.child(op.target, "properties", op.from_),
                                         jp.child(op.target, "properties", op.to)],
-                             description=f"proprietà {op.from_} -> {op.to} in {op.target} (nome sul wire cambiato)",
+                             description=f"proprietà {op.from_} -> {op.to} in {op.target} (nome sul wire cambiato"
+                                         + (f"; {extra} riferimenti in esempi/discriminator aggiornati)" if extra else ")"),
                              before=op.from_, after=op.to)
 
     def _apply_rename_path(self, doc: SpecDocument, op: ops.RenamePath) -> AppliedChange | None:
@@ -275,11 +267,14 @@ class RefactoringEngine:
         if sorted(re.findall(r"{([^}]+)}", op.from_)) != sorted(re.findall(r"{([^}]+)}", op.to)):
             raise ApplyError("RENAME_PATH non può cambiare i path parameter: usa RENAME_PARAMETER (in=path)")
         _rename_key(paths, op.from_, op.to)
+        refs.rename_path_refs(doc.data, op.from_, op.to)
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
                              locations=[jp.join(["paths", op.from_]), jp.join(["paths", op.to])],
                              description=f"path {op.from_} -> {op.to} (URL cambiato)", before=op.from_, after=op.to)
 
     def _apply_rename_parameter(self, doc: SpecDocument, op: ops.RenameParameter) -> AppliedChange | None:
+        """Target: l'operation o il path item che dichiara il parametro. Un path parameter vive nel template del
+        path e in tutte le operation del path item. Aggiorna anche i link che citano il parametro."""
         tokens = jp.split(op.target)
         if len(tokens) < 2 or tokens[0] != "paths":
             raise ApplyError(f"target non valido per RENAME_PARAMETER: {op.target}")
@@ -287,9 +282,19 @@ class RefactoringEngine:
         path_item = _require(doc, jp.join(["paths", path_key]), "path")
         if op.from_ == op.to:
             return None
-        # un path parameter vive nel template del path e in tutte le operation del path item
-        holders = [path_item] + [path_item[m] for m in HTTP_METHODS if isinstance(path_item.get(m), dict)] \
-            if op.in_ == "path" else [_require(doc, op.target, "operation")]
+        path_level = len(tokens) == 2
+        if op.in_ == "path" or path_level:
+            holders = [path_item] + [path_item[m] for m in HTTP_METHODS if isinstance(path_item.get(m), dict)]
+            if op.in_ != "path":  # query/header a livello di path: solo la dichiarazione del path item
+                holders = [path_item]
+            affected = refs.operations_of_path(doc.data, path_key)
+        else:
+            holders = [_require(doc, op.target, "operation")]
+            affected = [op.target]
+        for holder in holders:
+            if any(isinstance(p, dict) and p.get("in") == op.in_ and p.get("name") == op.to
+                   for p in holder.get("parameters") or []):
+                raise ApplyError(f"il parametro {op.in_}:{op.to} esiste già: la rinomina produrrebbe un duplicato")
         found: list[tuple[str | None, int]] = []  # (metodo o None per path-level, indice)
         for holder in holders:
             method = next((m for m in HTTP_METHODS if path_item.get(m) is holder), None)
@@ -299,6 +304,7 @@ class RefactoringEngine:
                     found.append((method, idx))
         if not found:
             raise ApplyError(f"parametro {op.in_}:{op.from_} non trovato in {op.target}")
+        links = refs.rename_parameter_in_links(doc.data, affected, op.in_, op.from_, op.to)
         new_key = path_key
         if op.in_ == "path":
             new_key = path_key.replace("{" + op.from_ + "}", "{" + op.to + "}")
@@ -306,13 +312,15 @@ class RefactoringEngine:
                 if new_key in doc.data["paths"]:
                     raise ApplyError(f"il path '{new_key}' esiste già")
                 _rename_key(doc.data["paths"], path_key, new_key)
+                refs.rename_path_refs(doc.data, path_key, new_key)
         locations = [jp.join(["paths", key, *([m] if m else []), "parameters", idx])
                      for key in {path_key, new_key} for m, idx in found]
         if new_key != path_key:
             locations += [jp.join(["paths", path_key]), jp.join(["paths", new_key])]
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
                              locations=locations,
-                             description=f"parametro {op.in_} {op.from_} -> {op.to} ({op.target})",
+                             description=f"parametro {op.in_} {op.from_} -> {op.to} ({op.target})"
+                                         + (f", {links} riferimenti nei link aggiornati" if links else ""),
                              before=op.from_, after=op.to)
 
     def _apply_move_component(self, doc: SpecDocument, op: ops.MoveComponent) -> AppliedChange | None:

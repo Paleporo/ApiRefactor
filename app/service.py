@@ -20,12 +20,17 @@ class RefactorOutcome(BaseModel):
     iterations: int
 
 
+def checkpoint_dir(output_dir: str | Path, input_path: str | Path) -> Path:
+    """Checkpoint della run: output/<api-name>/.checkpoint (accanto ai report)."""
+    return Path(output_dir) / Path(input_path).stem / ".checkpoint"
+
+
 async def refactor_file(config: AppConfig, input_path: str | Path, output_dir: str | Path | None = None,
-                        rules_dir: str | Path | None = None,
-                        provider: LlmProvider | None = None) -> tuple[RefactorOutcome, RunResult]:
+                        rules_dir: str | Path | None = None, provider: LlmProvider | None = None,
+                        resume: bool = False) -> tuple[RefactorOutcome, RunResult]:
     provider = provider or OllamaProvider(config)
     pipeline = RefactorPipeline(config, provider, rules_dir or config.rules_dir)
-    result = await pipeline.run(input_path)
+    result = await pipeline.run(input_path, checkpoint_dir(output_dir or config.output_dir, input_path), resume)
     out = OutputWriter(output_dir or config.output_dir).write(result)
     outcome = RefactorOutcome(status=result.status.value, reasons=result.reasons, output_dir=str(out),
                               iterations=len(result.iterations))

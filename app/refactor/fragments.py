@@ -103,6 +103,13 @@ def build_slice(doc: SpecDocument, fragment: Fragment, refs: RefIndex, budget_to
         "truncatedReferences": [],
         "existingComponentNames": {k: sorted(v) for k, v in components.items() if isinstance(v, dict)},
     }
+    if fragment.kind == ElementKind.OPERATION and fragment.path is not None:
+        # contesto minimo dal path item: solo i parametri dichiarati a livello di path (non le altre operation)
+        path_params = (doc.paths().get(fragment.path) or {}).get("parameters")
+        if path_params:
+            payload["pathParameters"] = path_params
+            definitions.update({t: refs.definitions[t] for p in path_params if isinstance(p, dict)
+                                for t in [refs.target_pointer(p.get("$ref", ""))] if t in refs.definitions})
     used = _tokens(payload)
     if used > budget_tokens:
         log.warning("[SLICE] %s supera da solo il budget (%d > %d token): inviato comunque, senza definizioni",

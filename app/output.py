@@ -97,6 +97,7 @@ class OutputWriter:
         _write_json(reports / "summary.json", {
             "status": r.status.value,
             "breakingChanges": r.breaking_changes,
+            "apiLifecycle": r.api_lifecycle,
             "reasons": r.reasons, "source": r.source.source_file,
             "sourceVersion": r.source.source_version.value, "targetVersion": r.source.target_version.value,
             "iterations": len(r.iterations), "finalIteration": r.final_iteration,
@@ -112,4 +113,5 @@ class OutputWriter:
             "timings": r.timings,
             "llmByRole": r.llm_stats,
             "llmCalls": r.llm_calls, "elapsedSeconds": r.elapsed_seconds,
+            "resume": {"resumed": r.resumed, "replayedLlmCalls": r.replayed_llm_calls},
         })
