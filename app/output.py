@@ -2,15 +2,65 @@
 
 from __future__ import annotations
 
+import csv
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any
 
 from app.errors import ConfigurationError
 from app.loader import dump_spec
+from app.model import pointer as jp
 from app.model.issues import count_by_severity
 from app.pipeline import RunResult
+
+
+ACRONYM = re.compile(r"[A-Z]{2,}")
+RENAME_COLUMNS = ["element", "location", "from", "to", "ruleId", "proposedBy", "iteration", "needsReview",
+                  "reviewReason"]
+
+
+def _container_renames(change) -> list[tuple[str, str, str]]:
+    """Rinomine che spostano altri elementi: (tipo, vecchio, nuovo) per schema e chiavi di path."""
+    r = change.rename or {}
+    if r.get("element") == "schema":
+        return [("schemas", r["from"], r["to"])]
+    if r.get("element") == "path":
+        return [("paths", r["from"], r["to"])]
+    if r.get("pathFrom"):
+        return [("paths", r["pathFrom"], r["pathTo"])]
+    return []
+
+
+def _to_final(location: str, later: list[tuple[str, str, str]]) -> str:
+    """Porta una posizione alle coordinate del documento finale applicando le rinomine successive."""
+    tokens = jp.split(location)
+    for kind, old, new in later:
+        if kind == "schemas" and tokens[:3] == ["components", "schemas", old]:
+            tokens[2] = new
+        elif kind == "paths" and tokens[:2] == ["paths", old]:
+            tokens[1] = new
+    return jp.join(tokens)
+
+
+def rename_map(result: RunResult) -> list[dict[str, Any]]:
+    """Rinomine incluse nell'output, con la posizione nel documento finale. Un nome originale con un acronimo
+    (2+ maiuscole consecutive) è marcato per revisione: la conversione lo ricompone per parole
+    (es. payer_IBAN -> payerIban), e va verificato che il risultato sia quello voluto (IBAN, HTTP, ID, ...)."""
+    rows = []
+    applied = result.final_applied
+    for i, c in enumerate(applied):
+        if not c.rename:
+            continue
+        later = [m for other in applied[i + 1:] for m in _container_renames(other)]
+        info = {k: v for k, v in c.rename.items() if k not in ("pathFrom", "pathTo")}
+        info["location"] = _to_final(info["location"], later)
+        acronyms = sorted(set(ACRONYM.findall(c.rename["from"])))
+        rows.append({**info, "ruleId": c.rule_id, "proposedBy": c.proposed_by, "iteration": c.iteration,
+                     "needsReview": bool(acronyms),
+                     "reviewReason": f"acronimo nel nome originale: {', '.join(acronyms)}" if acronyms else ""})
+    return rows
 
 
 def _write_json(path: Path, payload: Any) -> None:
@@ -89,6 +139,15 @@ class OutputWriter:
             "rejected": [c.model_dump(by_alias=True, mode="json") for c in r.rejected_changes],
             "failures": [f.model_dump(by_alias=True, mode="json") for f in r.failures],
         })
+        renames = rename_map(r)
+        _write_json(reports / "renames.json", {
+            "summary": {"total": len(renames), "needsReview": sum(x["needsReview"] for x in renames)},
+            "renames": renames,
+        })
+        with open(reports / "renames.csv", "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=RENAME_COLUMNS)
+            writer.writeheader()
+            writer.writerows(renames)
         _write_json(reports / "semantic-diff.json", {
             "summary": {"total": len(r.final_diff), "breaking": sum(c.breaking for c in r.final_diff),
                         "unexpected": sum(not c.expected for c in r.final_diff)},
@@ -110,6 +169,7 @@ class OutputWriter:
             "finalValidation": count_by_severity(r.final_validation),
             "finalGovernance": count_by_severity(r.final_governance),
             "compileFailedRules": r.compile_failed_rules,
+            "renames": {"total": len(renames), "needsReview": sum(x["needsReview"] for x in renames)},
             "timings": r.timings,
             "llmByRole": r.llm_stats,
             "llmCalls": r.llm_calls, "elapsedSeconds": r.elapsed_seconds,

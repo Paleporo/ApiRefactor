@@ -95,6 +95,22 @@ def normalize_targets(doc: SpecDocument, op):
     return op.model_copy(update=updates), "; ".join(notes)
 
 
+def _rename_info(op, change: AppliedChange) -> dict[str, str] | None:
+    """Dati strutturati della rinomina (elemento, posizione dopo la rinomina, vecchio e nuovo nome)."""
+    if op.type == "RENAME_SCHEMA":
+        return {"element": "schema", "location": jp.join(["components", "schemas", op.to]),
+                "from": op.from_, "to": op.to}
+    if op.type == "RENAME_PROPERTY":
+        return {"element": "property", "location": jp.child(op.target, "properties", op.to),
+                "from": op.from_, "to": op.to}
+    if op.type == "RENAME_PATH":
+        return {"element": "path", "location": jp.join(["paths", op.to]), "from": op.from_, "to": op.to}
+    if op.type == "ADD_OPERATION_ID" and change.before:  # cambio di un operationId esistente
+        return {"element": "operationId", "location": jp.child(op.target, "operationId"),
+                "from": str(change.before), "to": op.operation_id}
+    return None
+
+
 class RefactoringEngine:
     def apply(
         self, doc: SpecDocument, planned: list[ops.PlannedOperation], iteration: int = 0
@@ -121,6 +137,8 @@ class RefactoringEngine:
                 continue
             change.iteration = iteration
             change.proposed_by = item.proposed_by
+            if change.rename is None:
+                change.rename = _rename_info(op, change)
             if note:
                 change.description += f" ({note})"
             applied.append(change)
@@ -317,8 +335,15 @@ class RefactoringEngine:
                      for key in {path_key, new_key} for m, idx in found]
         if new_key != path_key:
             locations += [jp.join(["paths", path_key]), jp.join(["paths", new_key])]
+        new_holder = jp.join(["paths", new_key, *tokens[2:]])
+        rename = {"element": f"{op.in_} parameter", "location": jp.child(new_holder, "parameters", found[0][1])
+                  if not (op.in_ == "path" and found[0][0]) else
+                  jp.join(["paths", new_key, found[0][0], "parameters", found[0][1]]),
+                  "from": op.from_, "to": op.to}
+        if new_key != path_key:  # la chiave del path cambia: serve per riportare le altre posizioni al finale
+            rename.update({"pathFrom": path_key, "pathTo": new_key})
         return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
-                             locations=locations,
+                             locations=locations, rename=rename,
                              description=f"parametro {op.in_} {op.from_} -> {op.to} ({op.target})"
                                          + (f", {links} riferimenti nei link aggiornati" if links else ""),
                              before=op.from_, after=op.to)

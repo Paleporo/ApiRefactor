@@ -262,3 +262,89 @@ async def test_resume_refuses_changed_inputs_and_missing_checkpoint(config, agen
         cfg = config.with_overrides(max_iterations=5)
         (rules_dir / "general.md").write_text((rules_dir / "general.md").read_text().replace("- [NEW-1] Nuova regola.\n", ""))
         await RefactorPipeline(cfg, agents.provider(), rules_dir).run(spec, checkpoint, resume=True)
+
+
+# ── mappa delle rinomine ────────────────────────────────────────────────
+def test_engine_records_structured_rename_info():
+    rule = naming_rule((NameTarget.PATH_SEGMENT, Casing.KEBAB), (NameTarget.QUERY_PARAMETER, Casing.CAMEL),
+                       (NameTarget.HEADER, Casing.TRAIN), (NameTarget.OPERATION_ID, Casing.CAMEL),
+                       (NameTarget.PROPERTY_NAME, Casing.CAMEL), (NameTarget.SCHEMA_NAME, Casing.PASCAL))
+    _, _, new, applied, failures = run_deterministic(doc(), rule)
+    assert not failures
+    renames = {(c.rename["element"], c.rename["from"], c.rename["to"]): c.rename["location"]
+               for c in applied if c.rename}
+    assert renames == {
+        ("schema", "cat_pet", "CatPet"): "/components/schemas/CatPet",
+        ("property", "order_total", "orderTotal"): "/components/schemas/Order/properties/orderTotal",
+        ("property", "pet_type", "petType"): "/components/schemas/cat_pet/properties/petType",
+        ("query parameter", "page_size", "pageSize"): "/paths/~1Order_Items~1{orderId}/get/parameters/0",
+        ("header parameter", "x_trace_id", "X-Trace-Id"): "/paths/~1Order_Items~1{orderId}/parameters/1",
+        ("path parameter", "orderId", "order-id"): "/paths/~1Order_Items~1{order-id}/parameters/0",
+        ("path", "/Order_Items/{order-id}", "/order-items/{order-id}"): "/paths/~1order-items~1{order-id}",
+        ("operationId", "get_order", "getOrder"): "/paths/~1Order_Items~1{orderId}/get/operationId",
+        ("operationId", "put_order", "putOrder"): "/paths/~1Order_Items~1{orderId}/put/operationId",
+    }
+    # l'engine registra la posizione al momento della rinomina; il report la porta alle coordinate finali
+
+
+@pytest.mark.needs_node
+async def test_rename_report_locations_are_final_coordinates(config, agents, rules_dir, tmp_path):
+    """Path con segmento e path parameter da rinominare più un query parameter: tutte le posizioni del report
+    devono esistere nel documento finale."""
+    from app.output import rename_map
+    import yaml
+
+    spec = yaml.safe_load((APIS / "case-005-regression-guard.yaml").read_text())
+    item = spec["paths"].pop("/cards/{card-id}")
+    item["parameters"] = [dict(p, name="cardId") for p in item["get"].pop("parameters")]
+    item["get"]["parameters"] = [{"name": "page_size", "in": "query", "schema": {"type": "integer",
+                                                                                 "format": "int32"}}]
+    spec["paths"]["/Card_Items/{cardId}"] = item
+    spec_file = tmp_path / "cards.yaml"
+    spec_file.write_text(yaml.safe_dump(spec, sort_keys=False))
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(spec_file)
+    rows = rename_map(result)
+    assert {(r["element"], r["from"], r["to"]) for r in rows} >= {
+        ("path parameter", "cardId", "card-id"), ("query parameter", "page_size", "pageSize"),
+        ("path", "/Card_Items/{card-id}", "/card-items/{card-id}")}
+    assert all(jp_exists(result.final.data, r["location"]) for r in rows), rows
+
+
+def jp_exists(data, pointer):
+    from app.model import pointer as jp
+    return jp.exists(data, pointer)
+
+
+@pytest.mark.needs_node
+async def test_renames_report_json_and_csv_with_acronyms_flagged(config, agents, rules_dir, tmp_path):
+    import csv
+
+    import yaml
+
+    spec = yaml.safe_load((APIS / "case-002-naming.yaml").read_text())
+    props = spec["components"]["schemas"]["payment_order"]["properties"]
+    props["payer_IBAN"] = props.pop("payer_iban")
+    spec_file = tmp_path / "orders.yaml"
+    spec_file.write_text(yaml.safe_dump(spec, sort_keys=False))
+    result = await RefactorPipeline(config, agents.provider(), rules_dir).run(spec_file)
+    reports = OutputWriter(tmp_path / "out").write(result) / "reports"
+
+    payload = json.loads((reports / "renames.json").read_text())
+    rows = {(r["element"], r["from"], r["to"]): r for r in payload["renames"]}
+    assert set(rows) == {("schema", "payment_order", "PaymentOrder"),
+                         ("property", "amount_value", "amountValue"), ("property", "payer_IBAN", "payerIban"),
+                         ("property", "created_at", "createdAt")}
+    iban = rows[("property", "payer_IBAN", "payerIban")]
+    assert iban["needsReview"] is True and "IBAN" in iban["reviewReason"]
+    # posizione nel documento finale (lo schema contenitore è stato rinominato dopo la proprietà)
+    assert iban["location"] == "/components/schemas/PaymentOrder/properties/payerIban"
+    assert all(jp_exists(result.final.data, r["location"]) for r in payload["renames"])
+    assert iban["proposedBy"] == "deterministic" and iban["ruleId"]
+    assert [r["needsReview"] for k, r in rows.items() if k[1] != "payer_IBAN"] == [False] * 3
+    assert payload["summary"] == {"total": 4, "needsReview": 1}
+    with open(reports / "renames.csv", encoding="utf-8") as f:
+        csv_rows = list(csv.DictReader(f))
+    assert [(r["element"], r["from"], r["to"], r["needsReview"]) for r in csv_rows] == [
+        (r["element"], r["from"], r["to"], str(r["needsReview"])) for r in payload["renames"]]
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["renames"] == {"total": 4, "needsReview": 1}

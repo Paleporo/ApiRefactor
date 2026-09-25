@@ -184,6 +184,8 @@ class AppliedChange(BaseModel):
     iteration: int = 0
     # chi ha proposto l'operazione: deterministic | refactor | correction | pipeline
     proposed_by: str = Field("", alias="proposedBy")
+    # per le rinomine: {"element", "location", "from", "to"} (alimenta reports/renames.json)
+    rename: dict[str, str] | None = None
 
 
 class ApplyFailure(BaseModel):

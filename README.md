@@ -182,6 +182,9 @@ output/<api-name>/
                                      before/after, `inFinalOutput`), elenco dei cambi SEMANTIC dell'output,
                                      modifiche dei candidati scartati (`rejected`), operazioni non applicabili
         semantic-diff.json           diff semantico original → refactored (breaking / expected)
+        renames.json / renames.csv   mappa delle rinomine nell'output: elemento, posizione nel documento
+                                     finale, nome vecchio → nuovo, ruleId, chi l'ha proposta; `needsReview`
+                                     per i nomi originali con acronimi
         summary.json                 stato finale e motivazioni; `output` (iterazione scelta, `isBaseline`,
                                      nota); `baselineCounts` / `finalCounts` (ERROR, WARNING); condizioni di
                                      uscita e iterazioni scartate (`rejectedIterations`); `compileFailedRules`;
@@ -369,6 +372,12 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
     deterministico, perché il componente è condiviso.
   - **Tracciabilità:** le rinomine sono tracciate con il loro `ruleId` e, quando cambiano il wire, sono
     SEMANTIC e breaking.
+  - **Mappa delle rinomine** (`reports/renames.json` e `renames.csv`, totali in `summary.json`): una riga per
+    ogni rinomina inclusa nell'output. Contiene tipo di elemento (`schema`, `property`,
+    `query|header|path parameter`, `path`, `operationId`), posizione nel documento finale, nome vecchio →
+    nuovo, `ruleId`, `proposedBy` e iterazione. Le rinomine di nomi con un acronimo, cioè due o più maiuscole
+    consecutive come `payer_IBAN` → `payerIban`, sono marcate `needsReview` con il motivo: la conversione
+    ricompone le parole, e va verificato che la forma scelta per l'acronimo sia quella voluta.
   - **Path parameter:** una rinomina cambia la chiave del path, quindi nel piano viene eseguita dopo le altre
     operazioni sullo stesso path e prima di `RENAME_PATH`.
 - **Validazione del piano.**
