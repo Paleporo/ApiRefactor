@@ -13,6 +13,7 @@ violazioni che restano. Validazione del piano (prima di eseguirlo):
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -283,15 +284,22 @@ class RefactoringPlanner:
         return await self.llm.generate(request, ops.OperationsProposal)
 
     async def plan(self, doc: SpecDocument, refs: RefIndex, targets: list[tuple[Fragment, list[Violation]]],
-                   iteration: int, deterministic: list[ops.PlannedOperation] | None = None) -> RefactoringPlan:
+                   iteration: int, deterministic: list[ops.PlannedOperation] | None = None,
+                   progress: Any = None) -> RefactoringPlan:
         """`targets`: frammenti con le sole violazioni senza correzione deterministica (le vede l'LLM)."""
         plan = RefactoringPlan(iteration=iteration)
         proposed: list[ops.PlannedOperation] = list(deterministic or [])
         evidence = {(f.pointer or "/"): [(v.rule_id, v.path) for v in vs] for f, vs in targets}
         for fragment, violations in targets:
+            started = time.monotonic()
             try:
                 proposal = await self.propose_for_fragment(doc, refs, fragment, violations)
+                if progress is not None:
+                    progress.fragment_done(fragment.pointer or "/", time.monotonic() - started,
+                                           replayed=self.llm.last_replayed)
             except LlmCallError as exc:
+                if progress is not None:
+                    progress.fragment_done(fragment.pointer or "/", time.monotonic() - started, failed=True)
                 plan.failed_fragments.append(fragment.pointer or "/")
                 plan.issues.append(PlanIssue(kind="LLM_FAILED", message=f"{fragment.label}: {exc}"))
                 log.warning("[PLAN] %s: frammento marcato come FALLITO (%s)", fragment.label, exc)

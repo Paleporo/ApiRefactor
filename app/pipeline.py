@@ -40,6 +40,7 @@ from app.model import pointer as jp
 from app.model.document import ElementKind, SpecDocument
 from app.model.issues import Severity, Violation, ViolationSource, summary
 from app.model.refs import RefIndex
+from app.progress import ProgressTracker
 from app.refactor.deterministic import DeterministicPlan, deterministic_fixes
 from app.refactor.engine import RefactoringEngine
 from app.refactor.fragments import Fragment, build_fragments, fragment_content, fragment_for, group_by_fragment
@@ -171,6 +172,7 @@ class RunResult(BaseModel):
     output_note: str | None = None
     fragment_states: dict[str, dict[str, Any]] = Field(default_factory=dict)
     compile_failed_rules: list[dict[str, Any]] = Field(default_factory=list)
+    baseline_by_rule: dict[str, Any] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
     llm_stats: dict[str, dict[str, float]] = Field(default_factory=dict)
     llm_calls: int = 0
@@ -218,8 +220,9 @@ class RefactorPipeline:
 
     # ── run ────────────────────────────────────────────────────────────
     async def run(self, input_path: str | Path, checkpoint_dir: str | Path | None = None,
-                  resume: bool = False) -> RunResult:
-        """`checkpoint_dir`: dove salvare il giornale delle risposte LLM; con `resume` la run riprende da lì."""
+                  resume: bool = False, progress_path: str | Path | None = None) -> RunResult:
+        """`checkpoint_dir`: dove salvare il giornale delle risposte LLM; con `resume` la run riprende da lì.
+        `progress_path`: file di stato riscritto a ogni frammento completato (letto da `app.cli status`)."""
         deadline = Deadline(self.config.run_timeout_seconds)
         timer = PhaseTimer()
 
@@ -233,6 +236,10 @@ class RefactorPipeline:
             raise ExternalToolError("--resume richiede una cartella di checkpoint")
         llm = StructuredLlm(self.provider, self.config.llm_call_timeout_seconds, self.config.llm_technical_retries,
                             deadline, journal=journal)
+        progress = ProgressTracker(Path(progress_path) if progress_path else None, source=str(input_path),
+                                   max_iterations=self.config.max_iterations,
+                                   stale_after_seconds=self.config.llm_call_timeout_seconds, llm=llm)
+        self.progress = progress
         await self.preflight(needs_spectral=bool(spectral_ruleset_files(self.rules_dir)))
 
         conversion = upgrade_to_target(source, self.config)
@@ -246,6 +253,7 @@ class RefactorPipeline:
                 before=source.openapi_version, after=baseline.openapi_version, proposed_by="pipeline"))
 
         log.info("[RULES] caricamento regole da %s", self.rules_dir)
+        progress.set_phase("compile")
         with timer.phase("compile"):
             interpreter = RuleInterpreter(llm, Path(self.config.compiled_rules_cache_dir))
             registry, compile_report = await build_registry(self.rules_dir, interpreter)
@@ -264,6 +272,7 @@ class RefactorPipeline:
                                        source=ViolationSource.CONVERSION) for i in conversion.issues]
 
         log.info("[VALIDATE] baseline")
+        progress.set_phase("validation")
         with timer.phase("validation"):
             base_eval = self._evaluate(oas, governance, baseline, baseline, lineage, [])
         log.info("[VALIDATE] baseline: %s", summary(base_eval.validation + base_eval.governance))
@@ -278,9 +287,10 @@ class RefactorPipeline:
             # ── piano iniziale: correzioni deterministiche + LLM sul resto ──
             deadline.check("PLAN")
             with timer.phase("plan"):
-                plan = await self._initial_plan(planner, registry, baseline, base_eval)
+                plan = await self._initial_plan(planner, registry, baseline, base_eval, result)
             result.plans.append(plan)
             llm_failures += plan.failed_fragments
+            progress.set_phase("engine")
             with timer.phase("engine"):
                 pending = engine.apply(baseline, plan.operations, iteration=1)
             self._log_changes(pending[1])
@@ -289,6 +299,8 @@ class RefactorPipeline:
             # ── feedback loop ──────────────────────────────────────────
             for iteration in range(1, self.config.max_iterations + 1):
                 log.info("---- Iterazione %d/%d ----", iteration, self.config.max_iterations)
+                progress.set_iteration(iteration)
+                progress.set_phase("validation")
                 doc, changes, failures = pending
                 result.failures.extend(failures)
                 applied = current.applied + changes
@@ -339,6 +351,7 @@ class RefactorPipeline:
                                                        rejection_note)
                 result.plans.append(plan)
                 llm_failures += plan.failed_fragments
+                progress.set_phase("engine")
                 with timer.phase("engine"):
                     pending = engine.apply(current.doc, plan.operations, iteration=iteration + 1)
                 self._log_changes(pending[1])
@@ -347,6 +360,7 @@ class RefactorPipeline:
             result.reasons.append(str(exc))
 
         # ── final validator: il miglior candidato, mai peggiore della baseline ──
+        progress.set_phase("final")
         final = self._select_output(accepted, baseline_candidate, result)
         log.info("[FINAL] validazione finale del candidato (iterazione %d)", final.iteration)
         with timer.phase("validation"):
@@ -375,6 +389,7 @@ class RefactorPipeline:
         for b in result.breaking_changes:
             log.warning("[FINAL] BREAKING %s @ %s (ruleId %s)", b["type"], b["location"], b["ruleId"])
         log.info("[FINAL] tempi per fase (s): %s", result.timings)
+        progress.finish(result.status.value)
         return result
 
     # ── fasi ───────────────────────────────────────────────────────────
@@ -396,16 +411,53 @@ class RefactorPipeline:
         return det, visible
 
     async def _initial_plan(self, planner: RefactoringPlanner, registry: RuleRegistry, baseline: SpecDocument,
-                            base_eval: Evaluation) -> RefactoringPlan:
+                            base_eval: Evaluation, result: RunResult) -> RefactoringPlan:
         fragments = build_fragments(baseline)
         findings = [v for v in base_eval.validation + base_eval.governance if v.severity != Severity.INFO]
         det, visible = self._split(baseline, findings, registry, fragments)
         grouped = group_by_fragment(visible, fragments)
         # solo frammenti con violazioni per l'LLM: le regole di giudizio restano al Critic
         targets = [(f, grouped[f.pointer]) for f in fragments if grouped.get(f.pointer)]
-        log.info("[PLAN] %d frammenti all'LLM su %d", len(targets), len(fragments))
+        result.baseline_by_rule = self._baseline_by_rule(findings, det, visible, len(targets), len(fragments))
+        self._log_baseline_by_rule(result.baseline_by_rule)
+        self.progress.set_phase("plan", total=len(targets), announce=True)
         return await planner.plan(baseline, RefIndex(baseline.data), targets, iteration=1,
-                                  deterministic=det.operations)
+                                  deterministic=det.operations, progress=self.progress)
+
+    @staticmethod
+    def _baseline_by_rule(findings: list[Violation], det: DeterministicPlan, visible: list[Violation],
+                          llm_fragments: int, fragments: int) -> dict[str, Any]:
+        """Per ruleId: violazioni, quante con correzione deterministica, quante all'LLM, quante rivalutate
+        (su elementi riscritti da una correzione deterministica: si rivalutano dopo l'applicazione)."""
+        handled, to_llm = {id(v) for v in det.handled}, {id(v) for v in visible}
+        rows: dict[str, dict[str, Any]] = {}
+        for v in findings:
+            row = rows.setdefault(v.rule_id, {"ruleId": v.rule_id, "severity": v.severity.value, "total": 0,
+                                              "deterministic": 0, "llm": 0, "reevaluated": 0})
+            row["total"] += 1
+            key = "deterministic" if id(v) in handled else "llm" if id(v) in to_llm else "reevaluated"
+            row[key] += 1
+            if v.severity == Severity.ERROR:
+                row["severity"] = "ERROR"
+        ordered = sorted(rows.values(), key=lambda r: (-r["total"], r["ruleId"]))
+        totals = {k: sum(r[k] for r in ordered) for k in ("total", "deterministic", "llm", "reevaluated")}
+        return {"rules": ordered, "totals": totals, "llmFragments": llm_fragments, "fragments": fragments}
+
+    @staticmethod
+    def _log_baseline_by_rule(summary_: dict[str, Any]) -> None:
+        rows = summary_["rules"]
+        width = max([len(r["ruleId"]) for r in rows] + [len("TOTALE"), len("ruleId")])
+        log.info("[BASELINE] violazioni per regola (ERROR e WARNING), prima delle chiamate LLM di pianificazione:")
+        log.info("[BASELINE]   %-*s  %-7s %7s %7s %7s %11s", width, "ruleId", "sev.", "totale", "determ.", "LLM",
+                 "rivalutate")
+        for r in rows:
+            log.info("[BASELINE]   %-*s  %-7s %7d %7d %7d %11d", width, r["ruleId"], r["severity"], r["total"],
+                     r["deterministic"], r["llm"], r["reevaluated"])
+        t = summary_["totals"]
+        log.info("[BASELINE]   %-*s  %-7s %7d %7d %7d %11d", width, "TOTALE", "", t["total"], t["deterministic"],
+                 t["llm"], t["reevaluated"])
+        log.info("[BASELINE]   frammenti all'LLM: %d su %d (rivalutate = su elementi riscritti da correzioni "
+                 "deterministiche, rivalutate dopo l'applicazione)", summary_["llmFragments"], summary_["fragments"])
 
     async def _critic_stage(self, critic: CriticEngine, iteration: int, baseline: SpecDocument, doc: SpecDocument,
                             applied: list[AppliedChange], ev: Evaluation, states: dict[str, dict[str, Any]],
@@ -418,10 +470,11 @@ class RefactorPipeline:
             return CriticReport.skipped_for(iteration, f"{reason}: il candidato va prima corretto")
         fragments = build_fragments(doc)
         to_review, skipped = self._fragments_to_review(baseline, doc, fragments, ev.diff, applied, states)
-        log.info("[CRITIC] %d frammenti da rivedere, %d saltati", len(to_review), len(skipped))
+        deterministic_only = sum(1 for reason in skipped.values() if "deterministiche" in reason)
+        self.progress.set_phase("critic", total=len(to_review), skipped=deterministic_only, announce=True)
         report = await critic.review(iteration=iteration, baseline=baseline, candidate=doc, fragments=to_review,
                                      applied=applied, diff=ev.diff, validation=ev.validation,
-                                     governance=ev.governance + ev.untraced)
+                                     governance=ev.governance + ev.untraced, progress=self.progress)
         report.skipped_fragments = skipped
         reviewed = set(report.reviewed_fragments)
         for frag in fragments:
@@ -446,9 +499,10 @@ class RefactorPipeline:
         det, visible = self._split(current.doc, findings, registry, fragments)
         report = current.critic or CriticReport(iteration=current.iteration, accepted=True)
         targets = self._correction_targets(fragments, _errors(visible), report, current.failures, current.applied)
+        self.progress.set_phase("correction", total=len(targets), announce=True)
         return await corrector.correct(iteration=iteration, baseline=baseline, candidate=current.doc,
                                        targets=targets, applied=current.applied, deterministic=det.operations,
-                                       previous_rejection=rejection_note)
+                                       previous_rejection=rejection_note, progress=self.progress)
 
     # ── decisioni ──────────────────────────────────────────────────────
     @staticmethod

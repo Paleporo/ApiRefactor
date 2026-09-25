@@ -72,6 +72,7 @@ class StructuredLlm:
         self.technical_retries = technical_retries
         self.deadline = deadline
         self.calls = 0
+        self.last_replayed = False  # l'ultima generate è stata servita dal checkpoint
         # per ruolo: chiamate (tentativi), secondi totali, tentativi falliti
         self.stats: dict[str, dict[str, float]] = {}
 
@@ -92,6 +93,7 @@ class StructuredLlm:
         """`check` (opzionale) verifica vincoli deterministici oltre allo schema: se solleva ValueError il
         tentativo conta come non conforme e il messaggio torna al modello, come per gli errori di schema."""
         schema = llm_json_schema(response_model)
+        self.last_replayed = False
         journal_key = None
         if self.journal is not None:
             journal_key = self.journal.key({"role": request.role.value, "task": request.task, "system": request.system,
@@ -104,6 +106,7 @@ class StructuredLlm:
                     if check is not None:
                         check(result)
                     self.journal.replayed += 1
+                    self.last_replayed = True
                     log.debug("[CHECKPOINT] %s/%s servita dal checkpoint", request.role.value, request.task)
                     return result
                 except (ValidationError, json.JSONDecodeError, ValueError):

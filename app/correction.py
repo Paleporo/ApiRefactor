@@ -5,6 +5,7 @@ Stesso formato di output del RefactoringPlanner (operazioni tipizzate), stessa v
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from pydantic import BaseModel
@@ -47,7 +48,7 @@ class CorrectionEngine:
     async def correct(self, *, iteration: int, baseline: SpecDocument, candidate: SpecDocument,
                       targets: list[tuple[Fragment, list[Problem], str]], applied: list[ops.AppliedChange],
                       deterministic: list[ops.PlannedOperation] | None = None,
-                      previous_rejection: dict[str, Any] | None = None) -> RefactoringPlan:
+                      previous_rejection: dict[str, Any] | None = None, progress: Any = None) -> RefactoringPlan:
         """`targets`: (frammento nel candidato, problemi senza correzione deterministica, pointer del frammento
         nel documento originale). `previous_rejection`: tentativo di correzione precedente scartato perché
         peggiorava il candidato, mostrato al modello per non ripeterlo."""
@@ -75,9 +76,14 @@ class CorrectionEngine:
                                  context={"fragment": ptr, "iteration": iteration,
                                           "problems": [p.model_dump(mode="json") for p in problems],
                                           "original": original})
+            started = time.monotonic()
             try:
                 proposal = await self.llm.generate(request, ops.OperationsProposal)
+                if progress is not None:
+                    progress.fragment_done(ptr or "/", time.monotonic() - started, replayed=self.llm.last_replayed)
             except LlmCallError as exc:
+                if progress is not None:
+                    progress.fragment_done(ptr or "/", time.monotonic() - started, failed=True)
                 plan.failed_fragments.append(ptr or "/")
                 plan.issues.append(PlanIssue(kind="LLM_FAILED", message=f"{fragment.label}: {exc}"))
                 log.warning("[CORRECTION] %s: frammento marcato come FALLITO (%s)", fragment.label, exc)

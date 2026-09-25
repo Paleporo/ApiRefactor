@@ -7,6 +7,7 @@ bloccare un'iterazione. Solo i giudizi realmente semantici (qualità del naming,
 
 from __future__ import annotations
 
+import time
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -202,7 +203,7 @@ class CriticEngine:
 
     async def review(self, *, iteration: int, baseline: SpecDocument, candidate: SpecDocument,
                      fragments: list[Fragment], applied: list[AppliedChange], diff: list[DiffChange],
-                     validation: list[Violation], governance: list[Violation]) -> CriticReport:
+                     validation: list[Violation], governance: list[Violation], progress: Any = None) -> CriticReport:
         report = CriticReport(iteration=iteration, accepted=True)
         verifier = ClaimVerifier(candidate, diff, governance + validation, self.registry, applied)
         refs = RefIndex(candidate.data)
@@ -232,9 +233,14 @@ class CriticEngine:
                                  user="## Review input\n" + render(payload) + "\n\nReturn your verdict (JSON).",
                                  context={"fragment": ptr, "iteration": iteration,
                                           "diff": payload["semanticDiff"], "applied": payload["appliedOperations"]})
+            started = time.monotonic()
             try:
                 verdict = await self.llm.generate(request, CriticVerdict)
+                if progress is not None:
+                    progress.fragment_done(ptr or "/", time.monotonic() - started, replayed=self.llm.last_replayed)
             except LlmCallError as exc:
+                if progress is not None:
+                    progress.fragment_done(ptr or "/", time.monotonic() - started, failed=True)
                 log.warning("[CRITIC] %s: revisione FALLITA (%s)", fragment.label, exc)
                 report.failed_fragments.append(ptr or "/")
                 report.accepted = False

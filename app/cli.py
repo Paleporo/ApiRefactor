@@ -45,6 +45,11 @@ def _parser() -> argparse.ArgumentParser:
 
     comp = sub.add_parser("compile-rules", help="compila (o legge dalla cache) le regole in linguaggio naturale")
     common(comp)
+
+    st = sub.add_parser("status", help="stato di una run in corso o terminata (legge reports/progress.json)")
+    st.add_argument("--output", required=True, help="cartella della run, es. output/<nome-api>")
+    st.add_argument("--watch", action="store_true", help="aggiorna il riepilogo ogni 10 secondi")
+    st.add_argument("--interval", type=float, default=10.0, help=argparse.SUPPRESS)
     return parser
 
 
@@ -119,8 +124,38 @@ async def _refactor(config, args) -> int:
     return EXIT_CODES[outcome.status]
 
 
+def _status(output: str, watch: bool, interval: float) -> int:
+    """Legge progress.json (scritto in modo atomico dalla run) e stampa un riepilogo; funziona da un altro terminale."""
+    import json
+    import time
+
+    from app.progress import render_status
+
+    path = Path(output) / "reports" / "progress.json"
+    while True:
+        if not path.exists():
+            print(f"Nessun file di stato in {path}: la run non è partita o la cartella è sbagliata "
+                  "(usa --output output/<nome-api>)")
+            return 1
+        try:
+            progress = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"File di stato non leggibile ({exc})")
+            return 1
+        print(render_status(progress))
+        if not watch or progress.get("status") != "running":
+            return 0
+        print("-" * 60)
+        try:
+            time.sleep(interval)
+        except KeyboardInterrupt:
+            return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "status":  # non serve configurazione né Ollama
+        return _status(args.output, args.watch, args.interval)
     configure_logging("INFO")
     try:
         config = _config(args)

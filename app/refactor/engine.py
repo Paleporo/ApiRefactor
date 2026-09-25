@@ -266,12 +266,16 @@ class RefactoringEngine:
         _rename_key(props, op.from_, op.to)
         if isinstance(schema.get("required"), list):
             schema["required"] = [op.to if r == op.from_ else r for r in schema["required"]]
-        extra = refs.rename_property_references(doc.data, op.target, op.from_, op.to)
-        return AppliedChange(type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
+        extra, review = refs.rename_property_references(doc.data, op.target, op.from_, op.to)
+        rename = {"element": "property", "location": jp.child(op.target, "properties", op.to),
+                  "from": op.from_, "to": op.to, **({"examplesToReview": review} if review else {})}
+        return AppliedChange(rename=rename,type=op.type, rule_id=op.rule_id, category=ChangeCategory.SEMANTIC,
                              locations=[jp.child(op.target, "properties", op.from_),
                                         jp.child(op.target, "properties", op.to)],
                              description=f"proprietà {op.from_} -> {op.to} in {op.target} (nome sul wire cambiato"
-                                         + (f"; {extra} riferimenti in esempi/discriminator aggiornati)" if extra else ")"),
+                                         + (f"; {extra} riferimenti in required/esempi/discriminator aggiornati"
+                                            if extra else "")
+                                         + (f"; {len(review)} esempi da rivedere)" if review else ")"),
                              before=op.from_, after=op.to)
 
     def _apply_rename_path(self, doc: SpecDocument, op: ops.RenamePath) -> AppliedChange | None:

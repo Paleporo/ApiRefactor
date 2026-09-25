@@ -2,13 +2,13 @@
 
 Oltre alla chiave rinominata, un nome compare in altri punti del documento:
 - schema: `$ref`, `discriminator.mapping` (come `$ref` o come nome semplice);
-- proprietà: `required`, `example`/`examples` dello schema e dei media type che lo usano (chiavi di primo
-  livello degli oggetti di esempio), `discriminator.propertyName`;
+- proprietà: `required` (anche degli schemi che la ereditano via allOf, direttamente o in modo transitivo),
+  `example`/`examples` a qualunque profondità seguendo lo schema, `discriminator.propertyName`;
 - parametro: template del path (in=path), `links` che puntano all'operation (chiavi di `parameters`, anche
   nella forma `<in>.<nome>`) ed espressioni `$request.<in>.<nome>` nei link dell'operation stessa;
 - path e operationId: `links.operationRef` / `links.operationId`.
-Limiti noti: `required` di schemi che includono lo schema via `allOf` e gli esempi annidati oltre il primo
-livello non vengono aggiornati.
+Un esempio la cui corrispondenza con lo schema non è determinabile (rami oneOf/anyOf, externalValue) non viene
+toccato ma segnalato per revisione.
 """
 
 from __future__ import annotations
@@ -58,60 +58,181 @@ def rename_schema_in_discriminators(data: dict, old_name: str, new_name: str) ->
 
 
 # ── proprietà ──────────────────────────────────────────────────────────
-def _rename_in_example(example: Any, old: str, new: str) -> int:
-    if isinstance(example, dict):
-        return int(rename_key(example, old, new))
-    if isinstance(example, list):  # array di oggetti
-        return sum(_rename_in_example(item, old, new) for item in example)
-    return 0
+_EXAMPLE_KEYS = ("example", "examples")
 
 
-def _rename_in_example_holder(holder: dict, old: str, new: str) -> int:
-    count = _rename_in_example(holder.get("example"), old, new)
-    examples = holder.get("examples")
-    if isinstance(examples, dict):  # media type: {nome: {value: ...}}
-        count += sum(_rename_in_example(e.get("value"), old, new) for e in examples.values() if isinstance(e, dict))
-    elif isinstance(examples, list):  # schema 3.1: lista di esempi
-        count += sum(_rename_in_example(e, old, new) for e in examples)
-    return count
+def _resolve(data: dict, node: Any, max_hops: int = 20) -> Any:
+    seen: set[str] = set()
+    while isinstance(node, dict) and isinstance(node.get("$ref"), str) and node["$ref"].startswith("#"):
+        ref = node["$ref"]
+        if ref in seen or max_hops == 0:
+            return node
+        seen.add(ref)
+        max_hops -= 1
+        node = jp.resolve(data, ref[1:], None)
+    return node
 
 
-def _schema_uses(schema: Any, ref: str) -> bool:
-    if not isinstance(schema, dict):
-        return False
-    if schema.get("$ref") == ref:
+def _reaches(data: dict, schema: Any, target: dict, visited: set[int] | None = None) -> bool:
+    """True se `target` compare nell'albero dello schema (ref, proprietà, items, composizioni)."""
+    visited = visited if visited is not None else set()
+    schema = _resolve(data, schema)
+    if schema is target:
         return True
-    return isinstance(schema.get("items"), dict) and schema["items"].get("$ref") == ref
+    if not isinstance(schema, dict) or id(schema) in visited:
+        return False
+    visited.add(id(schema))
+    children = list((schema.get("properties") or {}).values())
+    children += [schema.get("items"), schema.get("additionalProperties")]
+    for comb in ("allOf", "oneOf", "anyOf"):
+        children += list(schema.get(comb) or [])
+    return any(isinstance(c, dict) and _reaches(data, c, target, visited) for c in children)
 
 
-def rename_property_references(data: dict, schema_ptr: str, old: str, new: str) -> int:
-    """Esempi e discriminator che citano la proprietà `old` dello schema in `schema_ptr`."""
-    schema = jp.resolve(data, schema_ptr, None)
+def _includes(data: dict, schema: Any, target: dict, visited: set[int] | None = None) -> bool:
+    """True se lo schema include `target` via allOf, direttamente o in modo transitivo."""
+    visited = visited if visited is not None else set()
+    schema = _resolve(data, schema)
+    if not isinstance(schema, dict) or id(schema) in visited:
+        return False
+    visited.add(id(schema))
+    for member in schema.get("allOf") or []:
+        resolved = _resolve(data, member)
+        if resolved is target or _includes(data, resolved, target, visited):
+            return True
+    return False
+
+
+def _declared(data: dict, schema: Any, exclude: dict, visited: set[int] | None = None) -> set[str]:
+    """Proprietà dichiarate dallo schema e dai suoi membri allOf, escluso lo schema `exclude`."""
+    visited = visited if visited is not None else set()
+    schema = _resolve(data, schema)
+    if not isinstance(schema, dict) or schema is exclude or id(schema) in visited:
+        return set()
+    visited.add(id(schema))
+    names = set((schema.get("properties") or {}).keys())
+    for member in schema.get("allOf") or []:
+        names |= _declared(data, member, exclude, visited)
+    return names
+
+
+def _schema_nodes(data: dict) -> Iterator[tuple[str, dict]]:
+    """Nodi dict del documento, esclusi i valori degli esempi (dati utente, non schemi)."""
+    def walk(node: Any, pointer: str) -> Iterator[tuple[str, dict]]:
+        if isinstance(node, dict):
+            yield pointer, node
+            for k, v in node.items():
+                if k not in _EXAMPLE_KEYS:
+                    yield from walk(v, jp.child(pointer, k))
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from walk(v, jp.child(pointer, i))
+    yield from walk(data, "")
+
+
+def rename_inherited_required(data: dict, target: dict, old: str, new: str) -> int:
+    """`required` degli schemi che includono `target` via allOf (anche transitivamente) e dei loro membri inline."""
     count = 0
-    if isinstance(schema, dict):
-        count += _rename_in_example_holder(schema, old, new)
-        disc = schema.get("discriminator")
-        if isinstance(disc, dict) and disc.get("propertyName") == old:
-            disc["propertyName"], count = new, count + 1
-    tokens = jp.split(schema_ptr)
-    if len(tokens) == 3 and tokens[:2] == ["components", "schemas"]:
-        ref = "#" + schema_ptr
-        for ptr, node in _walk(data):
-            if not isinstance(node, dict):
-                continue
-            # media type che usano lo schema (anche come items di un array)
-            if _schema_uses(node.get("schema"), ref) and ("example" in node or "examples" in node):
-                count += _rename_in_example_holder(node, old, new)
-            # schemi che lo includono via allOf: il discriminator può stare nel genitore
-            if any(isinstance(p, dict) and p.get("$ref") == ref for p in node.get("allOf") or []):
-                disc = node.get("discriminator")
-                if isinstance(disc, dict) and disc.get("propertyName") == old:
-                    disc["propertyName"], count = new, count + 1
-    elif "content" in tokens and tokens[-1] == "schema":  # schema inline di un media type
-        media = jp.resolve(data, jp.join(tokens[:-1]), None)
-        if isinstance(media, dict):
-            count += _rename_in_example_holder(media, old, new)
+    for _, node in _schema_nodes(data):
+        if node is target or not node.get("allOf") or not _includes(data, node, target):
+            continue
+        if old in _declared(data, node, exclude=target):
+            continue  # il nome è dichiarato anche da un altro membro: il required si riferisce a quello
+        holders = [node] + [m for m in node.get("allOf") or [] if isinstance(m, dict) and "$ref" not in m]
+        for holder in holders:
+            required = holder.get("required")
+            if isinstance(required, list) and old in required:
+                holder["required"] = [new if r == old else r for r in required]
+                count += 1
     return count
+
+
+def _walk_example(data: dict, value: Any, schema: Any, target: dict, old: str, new: str, ptr: str,
+                  review: list[str], visited: set[tuple[int, int]]) -> int:
+    """Rinomina la chiave `old` negli oggetti dell'esempio che corrispondono a `target`, seguendo lo schema."""
+    schema = _resolve(data, schema)
+    if not isinstance(schema, dict) or (id(value), id(schema)) in visited:
+        return 0
+    visited.add((id(value), id(schema)))
+    count = 0
+    if schema is target and isinstance(value, dict):
+        count += int(rename_key(value, old, new))
+    for member in schema.get("allOf") or []:
+        count += _walk_example(data, value, member, target, old, new, ptr, review, visited)
+    for comb in ("oneOf", "anyOf"):
+        if any(_reaches(data, b, target) for b in schema.get(comb) or []) and ptr not in review:
+            review.append(ptr)  # quale ramo descriva l'esempio non è determinabile
+    if isinstance(value, dict):
+        props = schema.get("properties") or {}
+        extra = schema.get("additionalProperties")
+        for key, item in value.items():
+            sub = props.get(key) if key in props else (extra if isinstance(extra, dict) else None)
+            if sub is not None:
+                count += _walk_example(data, item, sub, target, old, new, jp.child(ptr, key), review, visited)
+    elif isinstance(value, list) and isinstance(schema.get("items"), dict):
+        for i, item in enumerate(value):
+            count += _walk_example(data, item, schema["items"], target, old, new, jp.child(ptr, i), review, visited)
+    return count
+
+
+def _example_values(data: dict, holder: dict, pointer: str) -> Iterator[tuple[str, Any, bool]]:
+    """(pointer, valore, determinabile) di example/examples di un holder (schema, media type o parametro)."""
+    if "example" in holder:
+        yield jp.child(pointer, "example"), holder["example"], True
+    examples = holder.get("examples")
+    if isinstance(examples, list):  # schema 3.1: lista di esempi
+        for i, e in enumerate(examples):
+            yield jp.child(pointer, "examples", i), e, True
+    elif isinstance(examples, dict):  # media type / parametro: {nome: Example Object}
+        for name, e in examples.items():
+            ptr = jp.child(pointer, "examples", name)
+            if isinstance(e, dict) and isinstance(e.get("$ref"), str):
+                ptr = e["$ref"][1:]
+                e = _resolve(data, e)
+            if isinstance(e, dict) and "value" in e:
+                yield jp.child(ptr, "value"), e["value"], True
+            elif isinstance(e, dict) and "externalValue" in e:
+                yield jp.child(ptr, "externalValue"), None, False
+
+
+def rename_in_examples(data: dict, target: dict, old: str, new: str) -> tuple[int, list[str]]:
+    """Aggiorna gli esempi a qualunque profondità. Ritorna (chiavi rinominate, esempi da rivedere)."""
+    count, review = 0, []
+    visited: set[tuple[int, int]] = set()
+    for pointer, node in _schema_nodes(data):
+        if not any(k in node for k in _EXAMPLE_KEYS):
+            continue
+        # media type e parametri descrivono il valore con `schema`; uno schema descrive i propri esempi
+        schema = node.get("schema") if isinstance(node.get("schema"), dict) else node
+        if not _reaches(data, schema, target):
+            continue
+        for ptr, value, determinable in _example_values(data, node, pointer):
+            if not determinable:
+                if ptr not in review:
+                    review.append(ptr)  # esempio esterno: non aggiornabile
+                continue
+            count += _walk_example(data, value, schema, target, old, new, ptr, review, visited)
+    return count, review
+
+
+def rename_property_references(data: dict, schema_ptr: str, old: str, new: str) -> tuple[int, list[str]]:
+    """Riferimenti alla proprietà `old` dello schema in `schema_ptr` (già rinominata in `new`).
+
+    Aggiorna: `required` ereditati via allOf, esempi a qualunque profondità, `discriminator.propertyName`.
+    Ritorna (riferimenti aggiornati, esempi non aggiornabili da rivedere).
+    """
+    target = jp.resolve(data, schema_ptr, None)
+    if not isinstance(target, dict):
+        return 0, []
+    count = rename_inherited_required(data, target, old, new)
+    examples, review = rename_in_examples(data, target, old, new)
+    count += examples
+    for _, node in _schema_nodes(data):
+        disc = node.get("discriminator")
+        if isinstance(disc, dict) and disc.get("propertyName") == old and \
+                (node is target or _includes(data, node, target)):
+            disc["propertyName"], count = new, count + 1
+    return count, review
 
 
 # ── operation, parametri, link ─────────────────────────────────────────

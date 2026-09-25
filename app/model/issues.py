@@ -20,6 +20,7 @@ class ViolationSource(StrEnum):
     SPECTRAL = "spectral"
     COMPILED_RULE = "compiled-rule"
     SEMANTIC_DIFF = "semantic-diff"
+    STRUCTURAL = "structural"
 
 
 class Violation(BaseModel):

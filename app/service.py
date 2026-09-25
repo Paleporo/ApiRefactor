@@ -25,12 +25,19 @@ def checkpoint_dir(output_dir: str | Path, input_path: str | Path) -> Path:
     return Path(output_dir) / Path(input_path).stem / ".checkpoint"
 
 
+def progress_path(output_dir: str | Path, input_path: str | Path) -> Path:
+    """File di stato della run: output/<api-name>/reports/progress.json (letto da `app.cli status`)."""
+    return Path(output_dir) / Path(input_path).stem / "reports" / "progress.json"
+
+
 async def refactor_file(config: AppConfig, input_path: str | Path, output_dir: str | Path | None = None,
                         rules_dir: str | Path | None = None, provider: LlmProvider | None = None,
                         resume: bool = False) -> tuple[RefactorOutcome, RunResult]:
     provider = provider or OllamaProvider(config)
     pipeline = RefactorPipeline(config, provider, rules_dir or config.rules_dir)
-    result = await pipeline.run(input_path, checkpoint_dir(output_dir or config.output_dir, input_path), resume)
+    out_root = output_dir or config.output_dir
+    result = await pipeline.run(input_path, checkpoint_dir(out_root, input_path), resume,
+                                progress_path=progress_path(out_root, input_path))
     out = OutputWriter(output_dir or config.output_dir).write(result)
     outcome = RefactorOutcome(status=result.status.value, reasons=result.reasons, output_dir=str(out),
                               iterations=len(result.iterations))

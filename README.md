@@ -150,6 +150,8 @@ Altri comandi:
 ```bash
 uv run python -m app.cli compile-rules     # compila (o legge dalla cache) le regole .md e mostra il risultato
 uv run --extra server uvicorn app.api:app  # servizio REST opzionale: GET /health, POST /refactor
+uv run python -m app.cli status --output output/<nome-api>          # stato di una run (anche da un altro terminale)
+uv run python -m app.cli status --output output/<nome-api> --watch  # aggiornato ogni 10 secondi
 ```
 
 Exit code della CLI: `0` SUCCESS (oppure specifica senza path), `1` NEEDS_REVIEW, `2` FAILED,
@@ -182,6 +184,7 @@ output/<api-name>/
                                      before/after, `inFinalOutput`), elenco dei cambi SEMANTIC dell'output,
                                      modifiche dei candidati scartati (`rejected`), operazioni non applicabili
         semantic-diff.json           diff semantico original → refactored (breaking / expected)
+        progress.json                stato della run, riscritto a ogni frammento (vedi "Avanzamento")
         renames.json / renames.csv   mappa delle rinomine nell'output: elemento, posizione nel documento
                                      finale, nome vecchio → nuovo, ruleId, chi l'ha proposta; `needsReview`
                                      per i nomi originali con acronimi
@@ -358,14 +361,24 @@ InputLoader → SpecificationParser → RuleLoader → RuleInterpreter → Refac
 
   - **Riferimenti aggiornati** (`app/refactor/references.py`):
     - schema: `$ref` e `discriminator.mapping`, nella forma `$ref` o come nome semplice;
-    - proprietà: `required`, `example`/`examples` dello schema e dei media type che lo usano (anche come
-      `items` di un array), `discriminator.propertyName`;
+    - proprietà: `required`, anche quello degli schemi che includono lo schema via `allOf`, direttamente o in
+      modo transitivo, e dei loro membri inline. Non viene toccato se il nome vecchio è dichiarato anche da un
+      altro membro, perché lì si riferisce a quella proprietà. Poi `example`/`examples` a qualunque
+      profondità, seguendo lo schema (proprietà, `items`, `additionalProperties`, `allOf`, `$ref`, esempi in
+      `components/examples` referenziati), e `discriminator.propertyName`;
     - parametro: template del path, `links` che puntano all'operation (chiavi `nome` e `<in>.nome`),
       espressioni `$request.<in>.<nome>`;
     - path e operationId: `links.operationRef` e `links.operationId`.
 
-    Non vengono aggiornati il `required` di schemi che includono lo schema via `allOf` e gli esempi annidati
-    oltre il primo livello.
+    Un esempio la cui corrispondenza con lo schema non è determinabile (lo schema passa da `oneOf`/`anyOf`,
+    quindi non si sa quale ramo descriva l'esempio, oppure `externalValue`) non viene toccato: viene
+    segnalato per revisione in `renames.json` (`needsReview`, `examplesToReview`).
+  - **`required` orfani** (`STRUCT-REQUIRED-ORPHAN`, ERROR): è un controllo deterministico, sempre attivo,
+    eseguito dal GovernanceValidator dopo ogni applicazione. Ogni nome in un `required` deve esistere tra le
+    proprietà dello schema o degli schemi inclusi (`allOf`, e i rami `oneOf`/`anyOf`); un membro inline di un
+    `allOf` vede anche i suoi fratelli. Gli schemi aperti, senza proprietà né composizioni, non vengono
+    controllati. È un ERROR di governance e non di validità OpenAPI, perché il documento resta valido: blocca
+    il SUCCESS e va in correzione, invece di far finire la run in FAILED.
   - **Collisioni:** se il nuovo nome esiste già, o se due nomi dello stesso ambito diventerebbero uguali (per
     esempio `tax_amount` e `tax__amount`), non si rinomina nulla e la violazione passa all'LLM.
   - **Parametri via `$ref`:** i parametri definiti in `components/parameters` non vengono rinominati in modo
@@ -470,6 +483,34 @@ Ogni issue del Critic passa da una verifica deterministica prima di poter blocca
 | `BROKEN_REFERENCE` | `RefIndex.broken_refs()` | confermato |
 | `RULE_NOT_APPLIED` su una regola deterministica | violazioni del GovernanceValidator | confermato |
 | `NAMING_QUALITY`, `SCHEMA_INCONSISTENCY`, `MIGRATION_ERROR`, `OTHER`, regole di giudizio | nessuna (giudizio semantico) | severity ERROR |
+
+### Avanzamento e riepilogo della baseline
+
+- **Riepilogo della baseline per regola.** Subito dopo la validazione della baseline, e prima delle
+  chiamate LLM di pianificazione, il log mostra una tabella con una riga per `ruleId`, ordinata per numero
+  di violazioni decrescente. Colonne: severità, totale, violazioni con correzione deterministica, violazioni
+  all'LLM, violazioni *rivalutate*. Le rivalutate cadono su elementi che una correzione deterministica
+  riscrive, per esempio DE-STATUS-002 sulla response convertita da ERR-001: vengono rivalutate dopo
+  l'applicazione. In fondo ci sono i totali e il numero di frammenti che andranno all'LLM. Lo stesso
+  riepilogo è in `summary.json` (`baselineByRule`) e dà in pochi secondi l'ordine di grandezza della run.
+- **Log per frammento.** Per pianificazione, Critic e correzione:
+  - all'inizio della fase, i frammenti da elaborare; per il Critic anche quanti sono saltati perché hanno
+    solo modifiche deterministiche;
+  - una riga per frammento completato, per esempio
+    `[PLAN] 12/73 /paths/~1accounts/get: 48.2s | trascorso 9m40s | stima fine fase 16:52`. La stima usa la
+    durata media dei frammenti già completati nella fase;
+  - all'inizio di ogni iterazione, `---- Iterazione i/maxIterations ----`.
+- **Ripresa.** Con `--resume` le risposte prese dal checkpoint contano come completate ma sono indicate
+  (`da checkpoint`) ed escluse dalla media, altrimenti la stima risulterebbe troppo ottimista.
+- **`reports/progress.json`.** È riscritto in modo atomico (file temporaneo e rename) a ogni frammento, quindi
+  si può leggere mentre la run è in corso. Contiene: fase corrente, iterazione, frammenti completati/totali
+  della fase (da checkpoint, falliti, saltati), chiamate LLM fatte, fallite e da checkpoint, tempo trascorso
+  (run e fase), stima di fine fase, ultimo aggiornamento. A fine run lo stato diventa quello finale.
+- **`python -m app.cli status --output output/<nome-api>`** legge `progress.json` e stampa un riepilogo;
+  con `--watch` lo aggiorna ogni 10 secondi finché la run è in corso. Non serve né la configurazione né
+  Ollama, quindi funziona da un secondo terminale. Se il file non è aggiornato da più di
+  `llmCallTimeoutSeconds`, lo segnala ("nessun avanzamento da X minuti"): la run potrebbe essere bloccata o
+  interrotta.
 
 ### Resilienza
 

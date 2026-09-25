@@ -54,12 +54,15 @@ def rename_map(result: RunResult) -> list[dict[str, Any]]:
         if not c.rename:
             continue
         later = [m for other in applied[i + 1:] for m in _container_renames(other)]
-        info = {k: v for k, v in c.rename.items() if k not in ("pathFrom", "pathTo")}
+        info = {k: v for k, v in c.rename.items() if k not in ("pathFrom", "pathTo", "examplesToReview")}
         info["location"] = _to_final(info["location"], later)
         acronyms = sorted(set(ACRONYM.findall(c.rename["from"])))
+        stale = [_to_final(p, later) for p in c.rename.get("examplesToReview", [])]
+        reasons = ([f"acronimo nel nome originale: {', '.join(acronyms)}"] if acronyms else []) + \
+                  ([f"esempi non aggiornabili automaticamente: {', '.join(stale)}"] if stale else [])
         rows.append({**info, "ruleId": c.rule_id, "proposedBy": c.proposed_by, "iteration": c.iteration,
-                     "needsReview": bool(acronyms),
-                     "reviewReason": f"acronimo nel nome originale: {', '.join(acronyms)}" if acronyms else ""})
+                     "needsReview": bool(reasons), "reviewReason": "; ".join(reasons),
+                     **({"examplesToReview": stale} if stale else {})})
     return rows
 
 
@@ -145,7 +148,7 @@ class OutputWriter:
             "renames": renames,
         })
         with open(reports / "renames.csv", "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=RENAME_COLUMNS)
+            writer = csv.DictWriter(f, fieldnames=RENAME_COLUMNS, extrasaction="ignore")
             writer.writeheader()
             writer.writerows(renames)
         _write_json(reports / "semantic-diff.json", {
@@ -169,6 +172,7 @@ class OutputWriter:
             "finalValidation": count_by_severity(r.final_validation),
             "finalGovernance": count_by_severity(r.final_governance),
             "compileFailedRules": r.compile_failed_rules,
+            "baselineByRule": r.baseline_by_rule,
             "renames": {"total": len(renames), "needsReview": sum(x["needsReview"] for x in renames)},
             "timings": r.timings,
             "llmByRole": r.llm_stats,
